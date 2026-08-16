@@ -17,6 +17,7 @@ C  03/10/2026 Moved DISMO.for from Plant\CROPGRO to Plant\Generic-Pest
 C  06/25/2026 Improved output file formatting
 C  07/17/2026 Added defoliation/senescence logic (disease-induced senescence)
 C  07/28/2026 Added monocyclic disease support (NCYCLE parameter: M/P)
+C  08/16/2026 Added pre-plant environmental inoculum reconstruction.
 C-----------------------------------------------------------------------
       SUBROUTINE DISEASE_LEAF (DYNAMIC,
      &    CONTROL, ISWITCH, Tmin, Tmax, RH, LAI_TOTAL,    ! Input
@@ -28,11 +29,12 @@ C-----------------------------------------------------------------------
 C-----------------------------------------------------------------------
           USE ModuleDefs     
           IMPLICIT NONE
-          EXTERNAL F_RH, F_LWD, T_DEV, F_IR, F_DS, F_CANSPO, F_DEW,
-     &             F_TAVG, F_LR, F_LS, F_PS, F_LAF, F_LAR, F_PPSR,
+          EXTERNAL F_IR, F_DS, F_CANSPO, F_LR, F_LS, F_PS, F_LAF,
+     &             F_LAR, F_PPSR,
      &             F_PPSR_POP, APPLY_FUNGICIDE, CALC_DVIP,
      &             READ_DISEASE_PARAMETERS, F_VIRTUAL_LESIONS,
-     &             F_SEVERITY, GETLUN, F_DEFOLIATION
+     &             F_SEVERITY, GETLUN, F_DEFOLIATION,
+     &             DISMO_PRESEASON, DISMO_UPDATE_ENVIRONMENT
           SAVE
 C-----------------------------------------------------------------------
 C  Switches / constants
@@ -45,7 +47,7 @@ C-----------------------------------------------------------------------
           
           INTEGER DAS, DYNAMIC
           
-          REAL RH, LWD, Tdew, Es, E 
+          REAL RH, LWD
           
           REAL FT_D, FT, T, Tmin, Tmax
           REAL FT_G
@@ -82,6 +84,13 @@ C-----------------------------------------------------------------------
           REAL rrds
           CHARACTER(LEN=1), SAVE :: NCYCLE        ! 'M' or 'P' from parameter file
           LOGICAL,          SAVE :: IS_MONOCYCLIC ! .T
+          
+C--------- Primary inoculum build-up -----------          
+          REAL DAILY_IP
+          REAL, SAVE :: ACCUM_IP
+          REAL, SAVE :: SPOR_CLOUD
+          REAL, PARAMETER :: SPOR_DECAY = 0.7937
+          LOGICAL, SAVE :: PRESEASON_DONE
           
 C--------- Population (individuals) & potential rate per area -----------
           REAL SPORES_YEST, PREV_LATENTS, INF_COUNT_PREV, NPREV_POP
@@ -141,6 +150,9 @@ C--------- Population (individuals) & potential rate per area -----------
           FUNG_EFFICIENCY = 0.723
           LAI_PEAK_SEASON = 0.0
           SEVERITY_PCT    = 0.0
+          ACCUM_IP   = 0.0
+          SPOR_CLOUD = 0.0
+          PRESEASON_DONE = .FALSE.
 
           SPORES_YEST = 0.0
           NCYCLE      = 'P'
@@ -148,6 +160,13 @@ C--------- Population (individuals) & potential rate per area -----------
           VIRTUAL_PHOTO_FACTOR = 1.0
           HDR_DONE = .FALSE.
           
+          CALL READ_DISEASE_PARAMETERS(CONTROL,NDS, LESION_S, 
+     &              KVERHULST,YMAX, COF_A, COF_B, RVERHULST, TMIN_G,
+     &              TOT_G,TMAX_G,TMIN_D, TOT_D, TMAX_D, LDmin,
+     &              LESIONAGEOPT,LESLIFEMAX,DAE_START, beta,rrds,NCYCLE)
+               IS_MONOCYCLIC = (NCYCLE .EQ. 'M')
+               
+               
           IF (CONTROL%RUN .EQ. 1) THEN
               CALL GETLUN('DISOUT',LUN_OUT)
               OPEN(LUN_OUT, FILE='DISMO.OUT',
@@ -157,12 +176,32 @@ C--------- Population (individuals) & potential rate per area -----------
           ELSE
               OPEN(LUN_OUT, FILE='DISMO.OUT',
      &             STATUS='OLD', ACCESS='APPEND')
-          ENDIF  
+           ENDIF  
+!***********************************************************************
+!  SEASINIT -- reconstruct environmental inoculum before planting
+!***********************************************************************
+
+      ELSEIF (DYNAMIC .EQ. SEASINIT) THEN
+
+          IF (.NOT. PRESEASON_DONE) THEN
+              CALL DISMO_PRESEASON(CONTROL, NDS, TMIN_G, TOT_G,
+     &             TMAX_G, TMIN_D, TOT_D, TMAX_D, USE_WTH_RH,
+     &             SPOR_DECAY, ACCUM_IP, SPOR_CLOUD)
+              PRESEASON_DONE = .TRUE.
+          END IF
+          
 !***********************************************************************
 !  RATE — called every day
 !***********************************************************************
           
       ELSEIF (DYNAMIC .EQ. RATE) THEN
+          
+          !----- Cloud spore dynamic and primary inoculum build-up --------
+
+          CALL DISMO_UPDATE_ENVIRONMENT(Tmin, Tmax, RH, USE_WTH_RH,
+     &         NDS, TMIN_G, TOT_G, TMAX_G, TMIN_D, TOT_D, TMAX_D,
+     &         SPOR_DECAY, DAILY_IP, ACCUM_IP, SPOR_CLOUD,
+     &         T, LWD, FT, FT_D, FT_G)
 
 !----- Emergence gate ---------------------------------------------------
           
@@ -177,12 +216,6 @@ C--------- Population (individuals) & potential rate per area -----------
                LAI_INF_LIST = 0.0
                ADMITTED_AREA= 0.0
                SPORES_YEST  = 0.0
-               
-               CALL READ_DISEASE_PARAMETERS(CONTROL,NDS, LESION_S, 
-     &              KVERHULST,YMAX, COF_A, COF_B, RVERHULST, TMIN_G,
-     &              TOT_G,TMAX_G,TMIN_D, TOT_D, TMAX_D, LDmin,
-     &              LESIONAGEOPT,LESLIFEMAX,DAE_START, beta,rrds,NCYCLE)
-               IS_MONOCYCLIC = (NCYCLE .EQ. 'M')
           END IF
               
 !----- Disease activation (starts after DAE_START) ----------------------
@@ -192,13 +225,6 @@ C--------- Population (individuals) & potential rate per area -----------
           END IF
           
           IF (DISEASE_LIVE .EQ. 1) THEN
-              
-              CALL F_TAVG(Tmax, Tmin, T)
-              CALL F_DEW (T, Tmin, Tmax, Tdew)
-              IF (.NOT. USE_WTH_RH) THEN
-                 CALL F_RH(RH, Tdew, Es, E, T)
-              END IF
-              CALL F_LWD(RH, LWD)
               
 !----- Healthy LAI from yesterday’s cumulative loss ---------------------
               
@@ -227,10 +253,23 @@ C--------- Population (individuals) & potential rate per area -----------
               
 !----- Thermal response and inoculum deposition -------------------------
               
-              CALL T_DEV(T, TMIN_G, TOT_G, TMAX_G, TMIN_D, TOT_D,TMAX_D,
-     &                  FT, FT_D, FT_G)
-              CALL F_CANSPO(HEALTH_LAI_EPI, NDS, LESION_S, FSS)
-              CALL F_DS(FSS, NDS, DS)
+              !The epidemic begins only if the historical accumulation (ACCUM_IP)
+              !exceeds the fungus's intrinsic infection inefficiency (1 / YMAX).
+              !Weak pathogens require more environmental history; aggressive pathogens require less.
+              
+              IF (ACCUM_IP .GE. (NDS / MAX(YMAX, 1.0E-6))) THEN
+                  
+                  CALL F_CANSPO(HEALTH_LAI_EPI, SPOR_CLOUD,LESION_S,FSS)
+                  CALL F_DS(FSS, SPOR_CLOUD, DS)
+                  
+                  ! Subtracts the spore retained on the plant from the circulating cloud.
+                  SPOR_CLOUD = MAX(SPOR_CLOUD - DS, 0.0)
+                  
+              ELSE
+                  ! The environment has not yet surpassed the threshold for basic survival.
+                  FSS = 0.0
+                  DS  = 0.0
+              END IF
               
               CALL F_IR(FT, LWD, YMAX, COF_A, COF_B, IR)
               
@@ -632,7 +671,267 @@ C--------- Population (individuals) & potential rate per area -----------
      &            TRIM(TARGET_DISEASE)
           END IF
 
-      END SUBROUTINE READ_DISEASE_PARAMETERS
+       END SUBROUTINE READ_DISEASE_PARAMETERS
+
+!-----------------------------------------------------------------------
+!  PRE-PLANT ENVIRONMENTAL INOCULUM RECONSTRUCTION
+!
+!  CROPGRO does not call PEST during RATE before planting.  To keep the
+!  DISMO integration self-contained, this routine replays weather from
+!  SDATE through the day before PDATE at SEASINIT.  The resolved weather
+!  file and planting date are read from DSSAT48.INP, which is generated
+!  by the DSSAT input module for the active treatment.
+!-----------------------------------------------------------------------
+
+      SUBROUTINE DISMO_PRESEASON(CONTROL, NDS, TMIN_G, TOT_G, TMAX_G,
+     &    TMIN_D, TOT_D, TMAX_D, USE_WTH_RH, SPOR_DECAY, ACCUM_IP,
+     &    SPOR_CLOUD)
+
+      USE ModuleDefs
+      IMPLICIT NONE
+      EXTERNAL GETLUN, DISMO_UPDATE_ENVIRONMENT,
+     &         DISMO_NORMALIZE_DATE, DISMO_READ_WTH_FIELD
+
+      TYPE (ControlType) CONTROL
+
+      REAL NDS, TMIN_G, TOT_G, TMAX_G, TMIN_D, TOT_D, TMAX_D
+      REAL SPOR_DECAY, ACCUM_IP, SPOR_CLOUD
+      REAL WTMAX, WTMIN, WRH, DAILY_IP, T, LWD, FT, FT_D, FT_G
+      LOGICAL USE_WTH_RH, FOUND_HEADER, IN_PLANTING
+      LOGICAL OK_TMAX, OK_TMIN, OK_RH
+      INTEGER LUN_IO, LUN_WTH, IOS, WTH_DATE, FULL_DATE
+      INTEGER POS_TMAX, POS_TMIN, POS_RAIN, POS_RHUM
+      INTEGER PRESEASON_PDATE
+      CHARACTER(LEN=400) LINE, WTH_HEADER
+      CHARACTER(LEN=30) WTH_NAME
+      CHARACTER(LEN=120) WTH_PATH
+      CHARACTER(LEN=240) WTH_FILE
+
+      PRESEASON_PDATE = -99
+      WTH_NAME = ' '
+      WTH_PATH = ' '
+      IN_PLANTING = .FALSE.
+
+!----- Read resolved planting date and weather location -----------------
+
+      CALL GETLUN('DSMINP', LUN_IO)
+      OPEN(LUN_IO, FILE=TRIM(CONTROL%FILEIO), STATUS='OLD',
+     &     ACTION='READ', IOSTAT=IOS)
+      IF (IOS .NE. 0) THEN
+          WRITE(*,'(A)')
+     &      'WARNING (DISMO): Cannot open DSSAT input file; '
+     &      //'preseason reconstruction skipped.'
+          RETURN
+      END IF
+
+      DO WHILE (.TRUE.)
+          READ(LUN_IO, '(A)', IOSTAT=IOS) LINE
+          IF (IOS .NE. 0) EXIT
+          LINE = ADJUSTL(LINE)
+          IF (LEN_TRIM(LINE) .EQ. 0) CYCLE
+
+          IF (INDEX(LINE, 'WEATHERW') .EQ. 1) THEN
+              READ(LINE(9:), *, IOSTAT=IOS) WTH_NAME, WTH_PATH
+              CYCLE
+          END IF
+
+          IF (INDEX(LINE, '*PLANTING DETAILS') .EQ. 1) THEN
+              IN_PLANTING = .TRUE.
+              CYCLE
+          END IF
+
+          IF (IN_PLANTING) THEN
+              IF (LINE(1:1) .EQ. '*') THEN
+                  IN_PLANTING = .FALSE.
+              ELSE
+                  READ(LINE, *, IOSTAT=IOS) PRESEASON_PDATE
+                  IF (IOS .EQ. 0 .AND. PRESEASON_PDATE .GT. 0) THEN
+                      IN_PLANTING = .FALSE.
+                  END IF
+              END IF
+          END IF
+      END DO
+      CLOSE(LUN_IO)
+
+      IF (LEN_TRIM(WTH_NAME) .EQ. 0 .OR.
+     &    PRESEASON_PDATE .LE. CONTROL%YRSIM) THEN
+          WRITE(*,'(A)')
+     &      'WARNING (DISMO): Preseason weather or planting date '
+     &      //'was not found; reconstruction skipped.'
+          RETURN
+      END IF
+
+      IF (LEN_TRIM(WTH_PATH) .EQ. 0) THEN
+          WTH_FILE = TRIM(WTH_NAME)
+      ELSEIF (WTH_PATH(LEN_TRIM(WTH_PATH):LEN_TRIM(WTH_PATH))
+     &         .EQ. CHAR(92) .OR.
+     &         WTH_PATH(LEN_TRIM(WTH_PATH):LEN_TRIM(WTH_PATH))
+     &         .EQ. '/') THEN
+          WTH_FILE = TRIM(WTH_PATH)//TRIM(WTH_NAME)
+      ELSE
+          WTH_FILE = TRIM(WTH_PATH)//CHAR(92)//TRIM(WTH_NAME)
+      END IF
+
+!----- Read daily weather with positions defined by the WTH header ------
+
+      CALL GETLUN('DSMWTH', LUN_WTH)
+      OPEN(LUN_WTH, FILE=TRIM(WTH_FILE), STATUS='OLD',
+     &     ACTION='READ', IOSTAT=IOS)
+      IF (IOS .NE. 0) THEN
+          WRITE(*,'(A,A)')
+     &      'WARNING (DISMO): Cannot open weather file: ',
+     &      TRIM(WTH_FILE)
+          RETURN
+      END IF
+
+      FOUND_HEADER = .FALSE.
+      POS_TMAX = 0
+      POS_TMIN = 0
+      POS_RAIN = 0
+      POS_RHUM = 0
+
+      DO WHILE (.TRUE.)
+          READ(LUN_WTH, '(A)', IOSTAT=IOS) LINE
+          IF (IOS .NE. 0) EXIT
+          LINE = ADJUSTL(LINE)
+
+          IF (.NOT. FOUND_HEADER) THEN
+              IF (INDEX(LINE, '@DATE') .EQ. 1) THEN
+                  WTH_HEADER = LINE
+                  POS_TMAX = INDEX(WTH_HEADER, 'TMAX')
+                  POS_TMIN = INDEX(WTH_HEADER, 'TMIN')
+                  POS_RAIN = INDEX(WTH_HEADER, 'RAIN')
+                  POS_RHUM = INDEX(WTH_HEADER, 'RHUM')
+                  IF (POS_TMAX .GT. 0 .AND. POS_TMIN .GT. 0
+     &                .AND. POS_RAIN .GT. 0) THEN
+                      IF (USE_WTH_RH .AND. POS_RHUM .EQ. 0) THEN
+                          WRITE(*,'(A)')
+     &                    'WARNING (DISMO): RHUM is missing from WTH; '
+     &                    //'preseason reconstruction skipped.'
+                          CLOSE(LUN_WTH)
+                          RETURN
+                      END IF
+                      FOUND_HEADER = .TRUE.
+                  END IF
+              END IF
+              CYCLE
+          END IF
+
+          IF (LEN_TRIM(LINE) .EQ. 0 .OR. LINE(1:1) .EQ. '!') CYCLE
+          READ(LINE(1:5), '(I5)', IOSTAT=IOS) WTH_DATE
+          IF (IOS .NE. 0) CYCLE
+
+          CALL DISMO_NORMALIZE_DATE(WTH_DATE, FULL_DATE)
+          IF (FULL_DATE .LT. CONTROL%YRSIM .OR.
+     &        FULL_DATE .GE. PRESEASON_PDATE) CYCLE
+
+          CALL DISMO_READ_WTH_FIELD(LINE, POS_TMAX, POS_TMIN-1,
+     &         WTMAX, OK_TMAX)
+          CALL DISMO_READ_WTH_FIELD(LINE, POS_TMIN, POS_RAIN-1,
+     &         WTMIN, OK_TMIN)
+          IF (USE_WTH_RH) THEN
+              CALL DISMO_READ_WTH_FIELD(LINE, POS_RHUM, LEN(LINE),
+     &             WRH, OK_RH)
+          ELSE
+              WRH = 0.0
+              OK_RH = .TRUE.
+          END IF
+
+          IF (OK_TMAX .AND. OK_TMIN .AND. OK_RH) THEN
+              CALL DISMO_UPDATE_ENVIRONMENT(WTMIN, WTMAX, WRH,
+     &             USE_WTH_RH, NDS, TMIN_G, TOT_G, TMAX_G,
+     &             TMIN_D, TOT_D, TMAX_D, SPOR_DECAY, DAILY_IP,
+     &             ACCUM_IP, SPOR_CLOUD, T, LWD, FT, FT_D, FT_G)
+          END IF
+      END DO
+      CLOSE(LUN_WTH)
+
+      IF (.NOT. FOUND_HEADER) THEN
+          WRITE(*,'(A,A)')
+     &      'WARNING (DISMO): Cannot read WTH header from: ',
+     &      TRIM(WTH_FILE)
+      END IF
+
+      END SUBROUTINE DISMO_PRESEASON
+
+!-----------------------------------------------------------------------
+!  DAILY ENVIRONMENTAL INOCULUM UPDATE
+!-----------------------------------------------------------------------
+
+      SUBROUTINE DISMO_UPDATE_ENVIRONMENT(TMIN, TMAX, RH,
+     &    USE_WTH_RH, NDS, TMIN_G, TOT_G, TMAX_G,
+     &    TMIN_D, TOT_D, TMAX_D, SPOR_DECAY, DAILY_IP,
+     &    ACCUM_IP, SPOR_CLOUD, T, LWD, FT, FT_D, FT_G)
+
+      USE ModuleDefs
+      IMPLICIT NONE
+      EXTERNAL F_TAVG, F_DEW, F_RH, F_LWD, T_DEV
+
+      REAL TMIN, TMAX, RH, NDS, TMIN_G, TOT_G, TMAX_G
+      REAL TMIN_D, TOT_D, TMAX_D, SPOR_DECAY
+      REAL DAILY_IP, ACCUM_IP, SPOR_CLOUD, T, LWD, FT, FT_D, FT_G
+      REAL TDEW, ES, E, RH_LOCAL
+      LOGICAL USE_WTH_RH
+
+      CALL F_TAVG(TMAX, TMIN, T)
+      RH_LOCAL = RH
+      IF (.NOT. USE_WTH_RH) THEN
+          CALL F_DEW(T, TMIN, TMAX, TDEW)
+          CALL F_RH(RH_LOCAL, TDEW, ES, E, T)
+      END IF
+      CALL F_LWD(RH_LOCAL, LWD)
+      CALL T_DEV(T, TMIN_G, TOT_G, TMAX_G, TMIN_D, TOT_D,
+     &    TMAX_D, FT, FT_D, FT_G)
+
+      DAILY_IP = NDS * FT_G * (LWD / 24.0)
+      ACCUM_IP = ACCUM_IP + DAILY_IP
+      SPOR_CLOUD = (SPOR_CLOUD * SPOR_DECAY) + DAILY_IP
+
+      END SUBROUTINE DISMO_UPDATE_ENVIRONMENT
+
+!-----------------------------------------------------------------------
+!  NORMALIZE DSSAT weather dates (YYDDD or YYYYDDD) to YYYYDDD.
+!-----------------------------------------------------------------------
+
+      SUBROUTINE DISMO_NORMALIZE_DATE(INPUT_DATE, FULL_DATE)
+
+      IMPLICIT NONE
+      INTEGER INPUT_DATE, FULL_DATE, IYEAR, IDOY
+
+      IYEAR = INPUT_DATE / 1000
+      IDOY = INPUT_DATE - IYEAR * 1000
+      IF (IYEAR .LT. 100) THEN
+          IF (IYEAR .GT. 50) THEN
+              IYEAR = IYEAR + 1900
+          ELSE
+              IYEAR = IYEAR + 2000
+          END IF
+      END IF
+      FULL_DATE = IYEAR * 1000 + IDOY
+
+      END SUBROUTINE DISMO_NORMALIZE_DATE
+
+!-----------------------------------------------------------------------
+!  Read one fixed-width value from a DSSAT WTH record.
+!-----------------------------------------------------------------------
+
+      SUBROUTINE DISMO_READ_WTH_FIELD(LINE, FIRST, LAST, VALUE, OK)
+
+      IMPLICIT NONE
+      CHARACTER*(*) LINE
+      INTEGER FIRST, LAST, LAST_POS, IOS
+      REAL VALUE
+      LOGICAL OK
+
+      OK = .FALSE.
+      VALUE = 0.0
+      IF (FIRST .LT. 1 .OR. LAST .LT. FIRST) RETURN
+      IF (FIRST .GT. LEN(LINE)) RETURN
+      LAST_POS = MIN(LAST, LEN(LINE))
+      READ(LINE(FIRST:LAST_POS), *, IOSTAT=IOS) VALUE
+      IF (IOS .EQ. 0) OK = .TRUE.
+
+      END SUBROUTINE DISMO_READ_WTH_FIELD
 
 ! ------ AVERAGE TEMPERATURE
 
