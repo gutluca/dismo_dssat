@@ -56,9 +56,7 @@ C-----------------------------------------------------------------------
       
           REAL IR
           REAL FSS, LAI
-          REAL DS
           REAL LR
-          REAL LS
           REAL IS
           REAL LA, LAF, LESIONAGEOPT
           REAL PREV_IS
@@ -87,13 +85,24 @@ C-----------------------------------------------------------------------
           
 C--------- Primary inoculum build-up -----------          
           REAL DAILY_IP
-          REAL, SAVE :: ACCUM_IP
+          REAL, DIMENSION(60), SAVE :: REGIONAL_HISTORY
+          INTEGER, SAVE :: HIST_IDX
+          REAL, SAVE :: SOURCE_PRESSURE
           REAL, SAVE :: SPOR_CLOUD
           REAL, PARAMETER :: SPOR_DECAY = 0.7937
           LOGICAL, SAVE :: PRESEASON_DONE
           
+          REAL, SAVE :: SEC_SPORE_CLOUD
+          REAL, SAVE :: SEC_SPORES_PENDING
+          REAL, PARAMETER :: SEC_DECAY = 0.7937
+          REAL, PARAMETER :: SEC_RELEASE = 1.0
+          
+          REAL PRI_CLOUD, SEC_CLOUD, CLOUD_TOTAL
+          REAL DS_TOTAL, DS_PRI, DS_SEC
+          REAL LS_TODAY
+          
 C--------- Population (individuals) & potential rate per area -----------
-          REAL SPORES_YEST, PREV_LATENTS, INF_COUNT_PREV, NPREV_POP
+          REAL INF_COUNT_PREV, NPREV_POP
           REAL POT_SPO_PER_AREA, PS_K
           
           REAL, DIMENSION(MAXDAYS,5) :: ESP_LAT_HIST 
@@ -150,11 +159,15 @@ C--------- Population (individuals) & potential rate per area -----------
           FUNG_EFFICIENCY = 0.723
           LAI_PEAK_SEASON = 0.0
           SEVERITY_PCT    = 0.0
-          ACCUM_IP   = 0.0
+          REGIONAL_HISTORY = 0.0
+          HIST_IDX = 1
+          SOURCE_PRESSURE  = 0.0
           SPOR_CLOUD = 0.0
           PRESEASON_DONE = .FALSE.
+          
+          SEC_SPORE_CLOUD   = 0.0
+          SEC_SPORES_PENDING = 0.0
 
-          SPORES_YEST = 0.0
           NCYCLE      = 'P'
           IS_MONOCYCLIC = .FALSE.
           VIRTUAL_PHOTO_FACTOR = 1.0
@@ -186,7 +199,8 @@ C--------- Population (individuals) & potential rate per area -----------
           IF (.NOT. PRESEASON_DONE) THEN
               CALL DISMO_PRESEASON(CONTROL, NDS, TMIN_G, TOT_G,
      &             TMAX_G, TMIN_D, TOT_D, TMAX_D, USE_WTH_RH,
-     &             SPOR_DECAY, ACCUM_IP, SPOR_CLOUD)
+     &             SPOR_DECAY, SOURCE_PRESSURE, SPOR_CLOUD,
+     &             REGIONAL_HISTORY, HIST_IDX)
               PRESEASON_DONE = .TRUE.
           END IF
           
@@ -200,8 +214,14 @@ C--------- Population (individuals) & potential rate per area -----------
 
           CALL DISMO_UPDATE_ENVIRONMENT(Tmin, Tmax, RH, USE_WTH_RH,
      &         NDS, TMIN_G, TOT_G, TMAX_G, TMIN_D, TOT_D, TMAX_D,
-     &         SPOR_DECAY, DAILY_IP, ACCUM_IP, SPOR_CLOUD,
-     &         T, LWD, FT, FT_D, FT_G)
+     &         SPOR_DECAY, DAILY_IP, SOURCE_PRESSURE, SPOR_CLOUD,
+     &         T, LWD, FT, FT_D, FT_G, REGIONAL_HISTORY, HIST_IDX)
+          
+          
+          SEC_SPORE_CLOUD = SEC_SPORE_CLOUD * SEC_DECAY +
+     &                      SEC_SPORES_PENDING * SEC_RELEASE
+
+          SEC_SPORES_PENDING = 0.0
 
 !----- Emergence gate ---------------------------------------------------
           
@@ -215,8 +235,7 @@ C--------- Population (individuals) & potential rate per area -----------
                SUP_INF_LIST = 0.0
                LAI_INF_LIST = 0.0
                ADMITTED_AREA= 0.0
-               SPORES_YEST  = 0.0
-          END IF
+           END IF
               
 !----- Disease activation (starts after DAE_START) ----------------------
           
@@ -251,46 +270,46 @@ C--------- Population (individuals) & potential rate per area -----------
      &            BufferDays, FungActive, ResidualDays, NSprays,
      &            USE_FUNGICIDE, HEALTH_LAI)
               
-!----- Thermal response and inoculum deposition -------------------------
-              
-              !The epidemic begins only if the historical accumulation (ACCUM_IP)
-              !exceeds the fungus's intrinsic infection inefficiency (1 / YMAX).
-              !Weak pathogens require more environmental history; aggressive pathogens require less.
-              
-              IF (ACCUM_IP .GE. (NDS / MAX(YMAX, 1.0E-6))) THEN
-                  
-                  CALL F_CANSPO(HEALTH_LAI_EPI, SPOR_CLOUD,LESION_S,FSS)
-                  CALL F_DS(FSS, SPOR_CLOUD, DS)
-                  
-                  ! Subtracts the spore retained on the plant from the circulating cloud.
-                  SPOR_CLOUD = MAX(SPOR_CLOUD - DS, 0.0)
-                  
-              ELSE
-                  ! The environment has not yet surpassed the threshold for basic survival.
-                  FSS = 0.0
-                  DS  = 0.0
+!----- Deposition of primary and secondary inoculum ---------------------
+              ! Primary deposition requires the preseason environmental gate.
+              ! Secondary inoculum is local and therefore does not use that gate.
+              PRI_CLOUD = 0.0
+              IF (SOURCE_PRESSURE .GE. (NDS / MAX(YMAX, EPS))) THEN
+                  PRI_CLOUD = SPOR_CLOUD
+              END IF
+              SEC_CLOUD   = SEC_SPORE_CLOUD
+              CLOUD_TOTAL = PRI_CLOUD + SEC_CLOUD
+              DS_TOTAL = 0.0
+              DS_PRI   = 0.0
+              DS_SEC   = 0.0
+              FSS      = 0.0
+
+              ! Both sources compete for the healthy leaf area present today.
+              IF (CLOUD_TOTAL .GT. EPS .AND. HEALTH_LAI .GT. EPS) THEN
+                  CALL F_CANSPO(HEALTH_LAI, CLOUD_TOTAL, LESION_S,FSS)
+                  CALL F_DS(FSS, CLOUD_TOTAL, DS_TOTAL)
+                  DS_PRI = DS_TOTAL * PRI_CLOUD / CLOUD_TOTAL
+                  DS_SEC = DS_TOTAL * SEC_CLOUD / CLOUD_TOTAL
+                  SPOR_CLOUD = MAX(SPOR_CLOUD - DS_PRI, 0.0)
+                  SEC_SPORE_CLOUD = MAX(SEC_SPORE_CLOUD - DS_SEC,0.0)
               END IF
               
               CALL F_IR(FT, LWD, YMAX, COF_A, COF_B, IR)
               
               IF (FungActive) IR = IR * (1.0 - FUNG_EFFICIENCY)
 
-!----- No healthy leaf → no new deposits today --------------------------
+!----- No healthy leaf -> no successful infections today ----------------
               
-              IF (HEALTH_LAI_EPI .LE. 0.0) THEN
-                 IR = 0.0
-                 DS = 0.0
+              IF (HEALTH_LAI .LE. 0.0) THEN
+                  IR = 0.0
+                  DS_TOTAL = 0.0
               END IF
+              
+              CALL F_LS(IR, DS_TOTAL, LS_TODAY)
 
-              CALL F_LS(IR, DS, LS)
-
-!----- Register today's latent spores (cohort at DAE) -------------------
+!----- Current day accumulators ------------------------------------------
               
               DAE_IDX = MIN(DAE,MAXDAYS)
-              ESP_LAT_HIST(DAE_IDX, 1) = ESP_LAT_HIST(DAE_IDX, 1) + LS 
-
-!----- Day accumulators --------------------------------------------------
-              
               IS             = 0.0      ! infectious surface (m2 m-2) today
               ESP_INOC_SEC   = 0.0      ! total secondary spores today
               NEW_LOSS_TODAY = 0.0      ! newly activated surface today
@@ -309,24 +328,13 @@ C--------- Population (individuals) & potential rate per area -----------
           POT_SPO_PER_AREA = 0.0
           IF (.NOT. IS_MONOCYCLIC) THEN
                   
-              PREV_LATENTS = 0.0
-              IF (DAE .GT. 1) THEN
-                 KMAX = MIN(DAE-1, MAXDAYS)
-                 DO k = 1, KMAX
-                    IF (ESP_LAT_HIST(k,3) .EQ. 0.0) THEN
-                       PREV_LATENTS = PREV_LATENTS + ESP_LAT_HIST(k,1)
-                    END IF
-                 END DO
-              END IF
-
               INF_COUNT_PREV = 0.0
               IF (DAE .GT. 1) THEN
                  INF_COUNT_PREV = PREV_IS / MAX(LESION_S, EPS)
               END IF
 
-              NPREV_POP = MAX(SPORES_YEST,0.0) 
-     &                   + MAX(PREV_LATENTS,0.0)
-     &                   + MAX(INF_COUNT_PREV,0.0)
+              ! Only infectious lesions are a sporulating population.
+              NPREV_POP = MAX(INF_COUNT_PREV,0.0)
 
 !----- Potential spore rate per unit sporulating area (yesterday) -------
               
@@ -386,24 +394,21 @@ C--------- Population (individuals) & potential rate per area -----------
                   END IF
               END DO
 
-!----- Store infectious surface today & add secondary inoculum ----------
+!----- Store infectious surface and route secondary inoculum to cloud ---
               
               SUP_INF_LIST(DAE_IDX) = IS
               
           IF (.NOT. IS_MONOCYCLIC) THEN
-              IF (ESP_INOC_SEC .GT. 0.0) THEN
-                  ESP_LAT_HIST(DAE_IDX, 1) = ESP_LAT_HIST(DAE_IDX, 1) + 
-     &                                     ESP_INOC_SEC
-                  ESP_LAT_HIST(DAE_IDX, 5) = ESP_LAT_HIST(DAE_IDX, 5) + 
-     &                                     ESP_INOC_SEC
-              END IF
-
-!----- Pool of spores of the day (life=1 day) ---------------------------
-              
-              SPORES_YEST = ESP_INOC_SEC
+              ! Emitted spores become available for deposition tomorrow.
+              SEC_SPORES_PENDING = MAX(ESP_INOC_SEC, 0.0)
+              ESP_LAT_HIST(DAE_IDX, 5) = SEC_SPORES_PENDING
           ELSE
-              SPORES_YEST = 0.0
+              SEC_SPORES_PENDING = 0.0
           END IF
+
+!----- Register infections only after all existing cohorts advance ------
+              ESP_LAT_HIST(DAE_IDX, 1) = ESP_LAT_HIST(DAE_IDX, 1) +
+     &                                    LS_TODAY
               
 !----- Cumulative removed LAI (m2 m-2) ----------------------------------
               
@@ -542,7 +547,6 @@ C--------- Population (individuals) & potential rate per area -----------
             ADMITTED_AREA= 0.0
             DISEASE_LAI  = 0.0
             DAE = 1
-            SPORES_YEST  = 0.0
             idx = 1
             DVIP_pts(:) = 0
             SUM7 = 0
@@ -553,6 +557,9 @@ C--------- Population (individuals) & potential rate per area -----------
             LAI_PEAK_SEASON = 0.0
             SEVERITY_PCT    = 0.0
             DISEASE_SEN_RATE = 0.0
+            
+            SEC_SPORE_CLOUD   = 0.0
+            SEC_SPORES_PENDING = 0.0
             CLOSE(LUN_OUT)
             	 
       ENDIF
@@ -684,8 +691,8 @@ C--------- Population (individuals) & potential rate per area -----------
 !-----------------------------------------------------------------------
 
       SUBROUTINE DISMO_PRESEASON(CONTROL, NDS, TMIN_G, TOT_G, TMAX_G,
-     &    TMIN_D, TOT_D, TMAX_D, USE_WTH_RH, SPOR_DECAY, ACCUM_IP,
-     &    SPOR_CLOUD)
+     &    TMIN_D, TOT_D, TMAX_D, USE_WTH_RH, SPOR_DECAY,SOURCE_PRESSURE,
+     &    SPOR_CLOUD, REGIONAL_HISTORY, HIST_IDX)
 
       USE ModuleDefs
       IMPLICIT NONE
@@ -695,8 +702,10 @@ C--------- Population (individuals) & potential rate per area -----------
       TYPE (ControlType) CONTROL
 
       REAL NDS, TMIN_G, TOT_G, TMAX_G, TMIN_D, TOT_D, TMAX_D
-      REAL SPOR_DECAY, ACCUM_IP, SPOR_CLOUD
+      REAL SPOR_DECAY, SOURCE_PRESSURE, SPOR_CLOUD
       REAL WTMAX, WTMIN, WRH, DAILY_IP, T, LWD, FT, FT_D, FT_G
+      REAL, DIMENSION(60) :: REGIONAL_HISTORY
+      INTEGER HIST_IDX
       LOGICAL USE_WTH_RH, FOUND_HEADER, IN_PLANTING
       LOGICAL OK_TMAX, OK_TMIN, OK_RH
       INTEGER LUN_IO, LUN_WTH, IOS, WTH_DATE, FULL_DATE
@@ -841,7 +850,8 @@ C--------- Population (individuals) & potential rate per area -----------
               CALL DISMO_UPDATE_ENVIRONMENT(WTMIN, WTMAX, WRH,
      &             USE_WTH_RH, NDS, TMIN_G, TOT_G, TMAX_G,
      &             TMIN_D, TOT_D, TMAX_D, SPOR_DECAY, DAILY_IP,
-     &             ACCUM_IP, SPOR_CLOUD, T, LWD, FT, FT_D, FT_G)
+     &             SOURCE_PRESSURE, SPOR_CLOUD, T, LWD, FT, FT_D, FT_G,
+     &             REGIONAL_HISTORY, HIST_IDX)
           END IF
       END DO
       CLOSE(LUN_WTH)
@@ -861,7 +871,8 @@ C--------- Population (individuals) & potential rate per area -----------
       SUBROUTINE DISMO_UPDATE_ENVIRONMENT(TMIN, TMAX, RH,
      &    USE_WTH_RH, NDS, TMIN_G, TOT_G, TMAX_G,
      &    TMIN_D, TOT_D, TMAX_D, SPOR_DECAY, DAILY_IP,
-     &    ACCUM_IP, SPOR_CLOUD, T, LWD, FT, FT_D, FT_G)
+     &    SOURCE_PRESSURE, SPOR_CLOUD, T, LWD, FT, FT_D, FT_G,
+     &    REGIONAL_HISTORY, HIST_IDX)
 
       USE ModuleDefs
       IMPLICIT NONE
@@ -869,9 +880,12 @@ C--------- Population (individuals) & potential rate per area -----------
 
       REAL TMIN, TMAX, RH, NDS, TMIN_G, TOT_G, TMAX_G
       REAL TMIN_D, TOT_D, TMAX_D, SPOR_DECAY
-      REAL DAILY_IP, ACCUM_IP, SPOR_CLOUD, T, LWD, FT, FT_D, FT_G
+      REAL DAILY_IP, SOURCE_PRESSURE, SPOR_CLOUD, T, LWD, FT, FT_D, FT_G
       REAL TDEW, ES, E, RH_LOCAL
       LOGICAL USE_WTH_RH
+      
+      REAL, DIMENSION(60) :: REGIONAL_HISTORY
+      INTEGER :: HIST_IDX
 
       CALL F_TAVG(TMAX, TMIN, T)
       RH_LOCAL = RH
@@ -884,7 +898,15 @@ C--------- Population (individuals) & potential rate per area -----------
      &    TMAX_D, FT, FT_D, FT_G)
 
       DAILY_IP = NDS * FT_G * (LWD / 24.0)
-      ACCUM_IP = ACCUM_IP + DAILY_IP
+      SOURCE_PRESSURE = MAX(SOURCE_PRESSURE - 
+     &                  REGIONAL_HISTORY(HIST_IDX), 0.0)
+      
+      REGIONAL_HISTORY(HIST_IDX) = DAILY_IP
+      SOURCE_PRESSURE = SOURCE_PRESSURE + DAILY_IP
+      
+      HIST_IDX = HIST_IDX + 1
+      IF (HIST_IDX .GT. 60) HIST_IDX = 1
+      
       SPOR_CLOUD = (SPOR_CLOUD * SPOR_DECAY) + DAILY_IP
 
       END SUBROUTINE DISMO_UPDATE_ENVIRONMENT
@@ -1341,9 +1363,10 @@ C--------- Population (individuals) & potential rate per area -----------
 ! FT_D, FT_G        : Post-infection and germination temperature responses
 ! IR (0..1)         : Infection rate for the day
 ! FSS (0..1)        : Canopy fraction supporting spores (capacity fraction)
-! DS (spores m-2)   : Deposited spores today
+! DS_TOTAL (spores m-2): Total primary + secondary spores deposited today
+! DS_PRI, DS_SEC (spores m-2): Deposited primary and secondary portions
 ! LR (d-1)          : Latency progress rate
-! LS (spores m-2)   : Latent spores added to today's cohort
+! LS_TODAY (spores m-2): New infections added after cohort progression
 ! IS (m2 m-2)       : Infectious surface today
 ! LA (d)            : Lesion age of a cohort
 ! LAF (0..1)        : Lesion-age factor
@@ -1357,10 +1380,10 @@ C--------- Population (individuals) & potential rate per area -----------
 ! INF_AREA_K (m2 m-2)      : Infectious area allocated to cohort k today
 ! Lesion_Rate (d-1)        : Lesion aging rate
 ! ESP_INOC_SEC (spores m-2): Total secondary inoculum produced today
-! SPORES_YEST (spores m-2) : Secondary spores produced yesterday (1-day pool)
-! PREV_LATENTS (spores m-2): Sum of latent individuals (yesterday)
+! SEC_SPORES_PENDING (spores m-2): Today's emission, available tomorrow
+! SEC_SPORE_CLOUD (spores m-2): Airborne secondary inoculum after decay
 ! INF_COUNT_PREV (#)       : Count of infectious lesions yesterday
-! NPREV_POP (#)            : Population yesterday (spores + latents + lesions)
+! NPREV_POP (#)            : Infectious lesion population used for sporulation
 ! POT_SPO_PER_AREA (sp m-2 d-1 per m2 m-2):
 !                     Potential secondary spores per unit sporulating area
 ! PS_K (spores m-2)  : Secondary spores contributed by cohort k today
