@@ -3,28 +3,35 @@
 !=======================================================================
 ! DICTIONARY:
 ! Types of parameters: 'B' for Biological and 'I' for Inoculum
-! NDS        : Number of dispersed spores (spores m-2); primary inoculum forcing. 
-!              If not measured in the field, work with initial disease pressure ranges: 
-!              1000 (Low), 10000 (Medium), and 100000 (High).
-! LESION_S   : Average size of one lesion (m2)
-! KVERHULST  : Carrying capacity - max lesions per LAI unit (#/LAI)
-! RVERHULST  : Intrinsic logistic population growth rate (d-1)
-! YMAX       : Maximum infection efficiency (0-1)
-! COF_A      : Infection efficiency rate increase due to LWD
-! COF_B      : Wetness period duration for response deceleration (h)
-! TMIN_G     : Minimum temperature for germination (oC)
-! TOT_G      : Optimum temperature for germination (oC)
-! TMAX_G     : Maximum temperature for germination (oC)
-! TMIN_D     : Minimum temperature for fungal development (oC)
-! TOT_D      : Optimum temperature for fungal development (oC)
-! TMAX_D     : Maximum temperature for fungal development (oC)
-! LDMin      : Length of the shortest latency period (days)
+!
+! PARAMETERS OF INOCULUM AND ACTIVATION
+! NDS        : Number of depositable primary spores per unit regional cloud.
+! DAE_START  : Observed disease onset in days after emergence.
+!              Leave blank to activate automatic disease onset.
+! NCYCLE     : Disease cycle type: M for monocyclic, P for polycyclic.
+! SRC_THR    : Minimum accumulated source pressure for automatic onset.
+! CLD_THR    : Minimum spore-cloud index for automatic onset.
+! DAE_START may be blank.
+! SRC_THR and CLD_THR must always contain valid numeric values.
+!
+! BIOLOGICAL PARAMETERS
+! LESION_S    : Average size of one lesion (m2)
+! KVERHULST   : Carrying capacity - max lesions per LAI unit (#/LAI)
+! RVERHULST   : Intrinsic logistic population growth rate (d-1)
+! YMAX        : Maximum infection efficiency (0-1)
+! COF_A       : Infection efficiency rate increase due to LWD
+! COF_B       : Wetness period duration for response deceleration (h)
+! TMIN_G      : Minimum temperature for germination (oC)
+! TOT_G       : Optimum temperature for germination (oC)
+! TMAX_G      : Maximum temperature for germination (oC)
+! TMIN_D      : Minimum temperature for fungal development (oC)
+! TOT_D       : Optimum temperature for fungal development (oC)
+! TMAX_D      : Maximum temperature for fungal development (oC)
+! LDMin       : Length of the shortest latency period (days)
 ! LESIONAGEOPT: Lesion age for maximal spore production (0-1)
-! LESLIFEMAX : Maximum lesion lifespan (days)
-! DAE_START  : Days after emergence when disease can start (days)
-! beta       : Virtual lesions reduction factor parameter (0-1)
-! rrds       : Relative rate of disease-induced senescence (d-1)
-! NCYCLE     : If the simulated disease is purely monocyclic, then put "M"; if the disease is policyclic, then put "P".
+! LESLIFEMAX  : Maximum lesion lifespan (days)
+! beta        : Virtual lesions reduction factor parameter (0-1)
+! rrds        : Relative rate of disease-induced senescence (d-1)
 !
 ! AVAILABLE DISEASES:
 ! Asian Soybean Rust: Calibration "AsianSBRust1" done for Brazil's South and SouthEast regions, and similar climatic conditions
@@ -37,7 +44,7 @@ AsianSBRust1
 
 *DISEASE DATABASE
 
-@VAR#   VRNAME............      NDS        LESION_S       KVERHULST       RVERHULST            YMAX           COF_A           COF_B          TMIN_G           TOT_G          TMAX_G          TMIN_D           TOT_D          TMAX_D           LDMin    LESIONAGEOPT      LESLIFEMAX       DAE_START   beta   rrds  NCYCLE
-!Calibration                      I               B               B               B               B               B               B               B               B               B               B               B               B               B               B               B               I      B      B       I
+@VAR#     VRNAME............         NDS   DAE_START  NCYCLE   SRC_THR   CLD_THR       LESION_S      KVERHULST      RVERHULST        YMAX       COF_A       COF_B      TMIN_G       TOT_G      TMAX_G      TMIN_D       TOT_D      TMAX_D       LDMin   LESIONAGEOPT     LESLIFEMAX      beta      rrds
+!TYPE                                  I           I       I         I         I              B              B              B           B           B           B           B           B           B           B           B           B           B              B              B         B         B
 
-D00001  AsianSBRust1          17800    0.0000024977          421040           1.339           0.400           0.154           1.639           9.670          24.363          32.717          10.256          25.000          33.997           5.000           0.581          41.500             100    2.5  0.100       P
+D00001          AsianSBRust1       17800                   P      30.0       0.4   0.0000024977         421040          1.339       0.400       0.154       1.639       9.670      24.363      32.717      10.256      25.000      33.997       5.000          0.581         41.500       2.5     0.100

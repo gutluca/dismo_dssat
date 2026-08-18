@@ -41,13 +41,16 @@ C  Switches / constants
           LOGICAL, PARAMETER :: USE_FUNGICIDE  = .FALSE.
           LOGICAL, PARAMETER :: USE_WTH_RH     = .TRUE.
           REAL,    PARAMETER :: LAI_MIN_START  = 0.5
-          INTEGER, PARAMETER :: MAXDAYS        = 200
+          INTEGER, PARAMETER :: MAXDAYS        = 250
+          INTEGER, PARAMETER :: MAXPRESEASON   = 200
+          INTEGER, PARAMETER :: AUTO_LOOKBACK_DAYS = 60
           REAL,    PARAMETER :: EPS            = 1.0E-6
+          REAL,    PARAMETER :: DAE_W          = 5.0
 C-----------------------------------------------------------------------
           
           INTEGER DAS, DYNAMIC
           
-          REAL RH, LWD
+          REAL RH, LWD, RH_OUT, LWD_OUT, FT_OUT
           
           REAL FT_D, FT, T, Tmin, Tmax
           REAL FT_G
@@ -67,7 +70,7 @@ C-----------------------------------------------------------------------
           
           INTEGER YRDOY, YREMRG, PLANT_LIVE, NVEG0, YREND
           INTEGER DISEASE_LIVE
-          INTEGER IYEAR, IDOY, IDAP
+          INTEGER IYEAR, IDOY, IDAP, I_PRE
       
           REAL NDS, LESION_S, KVERHULST, RVERHULST
           REAL YMAX, COF_A, COF_B
@@ -80,26 +83,40 @@ C-----------------------------------------------------------------------
           REAL s, beta, fvl, VIRTUAL_PHOTO_FACTOR
           REAL WTLF, SLDOT, DISEASE_SEN_RATE
           REAL rrds
+          REAL SRC_THR, CLD_THR
           CHARACTER(LEN=1), SAVE :: NCYCLE        ! 'M' or 'P' from parameter file
           LOGICAL,          SAVE :: IS_MONOCYCLIC ! .T
           
 C--------- Primary inoculum build-up -----------          
           REAL DAILY_IP
-          REAL, DIMENSION(60), SAVE :: REGIONAL_HISTORY
-          INTEGER, SAVE :: HIST_IDX
           REAL, SAVE :: SOURCE_PRESSURE
           REAL, SAVE :: SPOR_CLOUD
           REAL, PARAMETER :: SPOR_DECAY = 0.7937
           LOGICAL, SAVE :: PRESEASON_DONE
+          INTEGER, SAVE :: PRESEASON_COUNT
+          INTEGER, DIMENSION(MAXPRESEASON), SAVE :: PRESEASON_DATE
+          REAL, DIMENSION(MAXPRESEASON), SAVE :: PRESEASON_RH
+          REAL, DIMENSION(MAXPRESEASON), SAVE :: PRESEASON_LWD
+          REAL, DIMENSION(MAXPRESEASON), SAVE :: PRESEASON_FT
           
           REAL, SAVE :: SEC_SPORE_CLOUD
           REAL, SAVE :: SEC_SPORES_PENDING
           REAL, PARAMETER :: SEC_DECAY = 0.7937
           REAL, PARAMETER :: SEC_RELEASE = 1.0
+
+          REAL, SAVE :: AUTO_TT
+          REAL, SAVE :: AUTO_BUP_RATE
+          REAL, SAVE :: AUTO_SOURCE_PRESSURE
+          REAL, SAVE :: AUTO_SPOR_CLOUD
+          LOGICAL, SAVE :: AUTO_ONSET
+          INTEGER, SAVE :: AUTO_ONSET_DAE
+          INTEGER, SAVE :: AUTO_ONSET_DATE
+          LOGICAL, SAVE :: DISEASE_PARAMETERS_FOUND
           
           REAL PRI_CLOUD, SEC_CLOUD, CLOUD_TOTAL
           REAL DS_TOTAL, DS_PRI, DS_SEC
           REAL LS_TODAY
+          REAL F_SOURCE, F_HOST, IP50, ARG
           
 C--------- Population (individuals) & potential rate per area -----------
           REAL INF_COUNT_PREV, NPREV_POP
@@ -120,6 +137,8 @@ C--------- Population (individuals) & potential rate per area -----------
           REAL, SAVE :: SEVERITY_PCT
           INTEGER, SAVE :: LUN_OUT
           LOGICAL, SAVE :: HDR_DONE
+          
+          LOGICAL, SAVE :: DAE_START_PRESENT
           
 !-----------------------------------------------------------------------
 !         Constructed types
@@ -159,24 +178,40 @@ C--------- Population (individuals) & potential rate per area -----------
           FUNG_EFFICIENCY = 0.723
           LAI_PEAK_SEASON = 0.0
           SEVERITY_PCT    = 0.0
-          REGIONAL_HISTORY = 0.0
-          HIST_IDX = 1
-          SOURCE_PRESSURE  = 0.0
-          SPOR_CLOUD = 0.0
-          PRESEASON_DONE = .FALSE.
+           SOURCE_PRESSURE  = 0.0
+           SPOR_CLOUD = 0.0
+           PRESEASON_DONE = .FALSE.
+          PRESEASON_COUNT = 0
+          PRESEASON_DATE = 0
+          PRESEASON_RH = 0.0
+          PRESEASON_LWD = 0.0
+          PRESEASON_FT = 0.0
           
           SEC_SPORE_CLOUD   = 0.0
           SEC_SPORES_PENDING = 0.0
 
+          AUTO_TT = 0.0
+          AUTO_BUP_RATE = 0.0
+          AUTO_SOURCE_PRESSURE = 0.0
+          AUTO_SPOR_CLOUD = 0.0
+          AUTO_ONSET = .FALSE.
+          AUTO_ONSET_DAE = 0
+          AUTO_ONSET_DATE = 0
+
           NCYCLE      = 'P'
           IS_MONOCYCLIC = .FALSE.
+          DAE_START = 0
+          DAE_START_PRESENT = .FALSE.
+          DISEASE_PARAMETERS_FOUND = .FALSE.
           VIRTUAL_PHOTO_FACTOR = 1.0
           HDR_DONE = .FALSE.
           
           CALL READ_DISEASE_PARAMETERS(CONTROL,NDS, LESION_S, 
      &              KVERHULST,YMAX, COF_A, COF_B, RVERHULST, TMIN_G,
      &              TOT_G,TMAX_G,TMIN_D, TOT_D, TMAX_D, LDmin,
-     &              LESIONAGEOPT,LESLIFEMAX,DAE_START, beta,rrds,NCYCLE)
+     &              LESIONAGEOPT,LESLIFEMAX,DAE_START, beta,rrds,NCYCLE,
+     &              DAE_START_PRESENT, DISEASE_PARAMETERS_FOUND,
+     &              SRC_THR, CLD_THR)
                IS_MONOCYCLIC = (NCYCLE .EQ. 'M')
                
                
@@ -197,10 +232,14 @@ C--------- Population (individuals) & potential rate per area -----------
       ELSEIF (DYNAMIC .EQ. SEASINIT) THEN
 
           IF (.NOT. PRESEASON_DONE) THEN
-              CALL DISMO_PRESEASON(CONTROL, NDS, TMIN_G, TOT_G,
+               CALL DISMO_PRESEASON(CONTROL, TMIN_G, TOT_G,
      &             TMAX_G, TMIN_D, TOT_D, TMAX_D, USE_WTH_RH,
      &             SPOR_DECAY, SOURCE_PRESSURE, SPOR_CLOUD,
-     &             REGIONAL_HISTORY, HIST_IDX)
+     &             PRESEASON_DATE, PRESEASON_RH, PRESEASON_LWD,
+     &             PRESEASON_FT, PRESEASON_COUNT, MAXPRESEASON,
+     &             DISEASE_PARAMETERS_FOUND, DAE_START_PRESENT,
+     &             AUTO_TT, AUTO_BUP_RATE, AUTO_SOURCE_PRESSURE,
+     &             AUTO_SPOR_CLOUD, AUTO_LOOKBACK_DAYS)
               PRESEASON_DONE = .TRUE.
           END IF
           
@@ -212,10 +251,21 @@ C--------- Population (individuals) & potential rate per area -----------
           
           !----- Cloud spore dynamic and primary inoculum build-up --------
 
-          CALL DISMO_UPDATE_ENVIRONMENT(Tmin, Tmax, RH, USE_WTH_RH,
-     &         NDS, TMIN_G, TOT_G, TMAX_G, TMIN_D, TOT_D, TMAX_D,
+           CALL DISMO_UPDATE_ENVIRONMENT(Tmin, Tmax, RH, USE_WTH_RH,
+     &         TMIN_G, TOT_G, TMAX_G, TMIN_D, TOT_D, TMAX_D,
      &         SPOR_DECAY, DAILY_IP, SOURCE_PRESSURE, SPOR_CLOUD,
-     &         T, LWD, FT, FT_D, FT_G, REGIONAL_HISTORY, HIST_IDX)
+     &         T, LWD, FT, FT_D, FT_G)
+
+           IF (DISEASE_PARAMETERS_FOUND .AND.
+     &         (.NOT. DAE_START_PRESENT)) THEN
+               AUTO_BUP_RATE = MAX(FT_G, 0.0) *
+     &            MIN(MAX(LWD / 24.0, 0.0), 1.0)
+               AUTO_TT = AUTO_TT + AUTO_BUP_RATE
+               AUTO_SOURCE_PRESSURE = AUTO_SOURCE_PRESSURE * 0.98 +
+     &                                AUTO_BUP_RATE
+               AUTO_SPOR_CLOUD = AUTO_SPOR_CLOUD * SPOR_DECAY +
+     &          (1.0 - SPOR_DECAY) * AUTO_BUP_RATE
+           END IF
           
           
           SEC_SPORE_CLOUD = SEC_SPORE_CLOUD * SEC_DECAY +
@@ -237,11 +287,28 @@ C--------- Population (individuals) & potential rate per area -----------
                ADMITTED_AREA= 0.0
            END IF
               
-!----- Disease activation (starts after DAE_START) ----------------------
-          
-          IF ((PLANT_LIVE .EQ. 1) .AND. (DAE .GE. DAE_START)) THEN 
+!----- Disease activation requires an established canopy ----------------
+           
+          IF ((PLANT_LIVE .EQ. 1) .AND.
+     &        (LAI_TOTAL .GE. LAI_MIN_START)) THEN
               DISEASE_LIVE = 1
-          END IF
+           ELSE
+               DISEASE_LIVE = 0
+           END IF
+
+           IF (DISEASE_PARAMETERS_FOUND .AND.
+     &         (.NOT. DAE_START_PRESENT)) THEN
+               IF (.NOT. AUTO_ONSET) THEN
+                    IF (DISEASE_LIVE .EQ. 1 .AND.
+     &                 AUTO_SOURCE_PRESSURE .GE. SRC_THR .AND.
+     &                 AUTO_SPOR_CLOUD .GE. CLD_THR .AND.
+     &                 AUTO_BUP_RATE .GT. EPS) THEN
+                       AUTO_ONSET = .TRUE.
+                       AUTO_ONSET_DAE = DAE
+                       AUTO_ONSET_DATE = YRDOY
+                   END IF
+               END IF
+           END IF
           
           IF (DISEASE_LIVE .EQ. 1) THEN
               
@@ -271,13 +338,27 @@ C--------- Population (individuals) & potential rate per area -----------
      &            USE_FUNGICIDE, HEALTH_LAI)
               
 !----- Deposition of primary and secondary inoculum ---------------------
-              ! Primary deposition requires the preseason environmental gate.
-              ! Secondary inoculum is local and therefore does not use that gate.
-              PRI_CLOUD = 0.0
-              IF (SOURCE_PRESSURE .GE. (NDS / MAX(YMAX, EPS))) THEN
-                  PRI_CLOUD = SPOR_CLOUD
-              END IF
-              SEC_CLOUD   = SEC_SPORE_CLOUD
+               ! Primary source and host responses are continuous.
+               ! NDS converts the dimensionless regional cloud to conidia m-2.
+               IP50     = 1.0 / MAX(YMAX, EPS)
+               F_SOURCE = SOURCE_PRESSURE /
+     &                    (SOURCE_PRESSURE + MAX(IP50, EPS))
+               IF (DAE_START_PRESENT) THEN
+                   ARG = -(REAL(DAE) - REAL(DAE_START)) / DAE_W
+                   IF (ARG .GT. 30.0) THEN
+                       F_HOST = 0.0
+                   ELSE
+                       F_HOST = 1.0 / (1.0 + EXP(ARG))
+                   END IF
+               ELSE
+                   IF (AUTO_ONSET) THEN
+                       F_HOST = 1.0
+                   ELSE
+                       F_HOST = 0.0
+                   END IF
+               END IF
+               PRI_CLOUD = SPOR_CLOUD * NDS * F_SOURCE * F_HOST
+               SEC_CLOUD   = SEC_SPORE_CLOUD
               CLOUD_TOTAL = PRI_CLOUD + SEC_CLOUD
               DS_TOTAL = 0.0
               DS_PRI   = 0.0
@@ -287,11 +368,10 @@ C--------- Population (individuals) & potential rate per area -----------
               ! Both sources compete for the healthy leaf area present today.
               IF (CLOUD_TOTAL .GT. EPS .AND. HEALTH_LAI .GT. EPS) THEN
                   CALL F_CANSPO(HEALTH_LAI, CLOUD_TOTAL, LESION_S,FSS)
-                  CALL F_DS(FSS, CLOUD_TOTAL, DS_TOTAL)
-                  DS_PRI = DS_TOTAL * PRI_CLOUD / CLOUD_TOTAL
-                  DS_SEC = DS_TOTAL * SEC_CLOUD / CLOUD_TOTAL
-                  SPOR_CLOUD = MAX(SPOR_CLOUD - DS_PRI, 0.0)
-                  SEC_SPORE_CLOUD = MAX(SEC_SPORE_CLOUD - DS_SEC,0.0)
+                   CALL F_DS(FSS, CLOUD_TOTAL, DS_TOTAL)
+                   DS_PRI = DS_TOTAL * PRI_CLOUD / CLOUD_TOTAL
+                   DS_SEC = DS_TOTAL * SEC_CLOUD / CLOUD_TOTAL
+                   SEC_SPORE_CLOUD = MAX(SEC_SPORE_CLOUD - DS_SEC,0.0)
               END IF
               
               CALL F_IR(FT, LWD, YMAX, COF_A, COF_B, IR)
@@ -345,7 +425,7 @@ C--------- Population (individuals) & potential rate per area -----------
 
 !----- Cohort loop -------------------------------------------------------
               
-              KMAX = MIN(DAE,MAXDAYS)
+              KMAX = MIN(DAE - 1,MAXDAYS)
               DO k = 1, KMAX
 
                   CALL F_LR (FT_D, LDmin, LR)
@@ -496,7 +576,19 @@ C--------- Population (individuals) & potential rate per area -----------
             END IF
 
 !----- Days after emergence -----------------------------------------------
-            IDAP = MAX(DAE - 1, 0)
+             IDAP = MAX(DAE - 1, 0)
+
+!----- Use replayed climate diagnostics for pre-plant output dates ------
+            RH_OUT = RH
+            LWD_OUT = LWD
+            FT_OUT = FT
+            DO I_PRE = 1, PRESEASON_COUNT
+                IF (PRESEASON_DATE(I_PRE) .EQ. YRDOY) THEN
+                    RH_OUT = PRESEASON_RH(I_PRE)
+                    LWD_OUT = PRESEASON_LWD(I_PRE)
+                    FT_OUT = PRESEASON_FT(I_PRE)
+                END IF
+            END DO
 
 !----- Write run header once per run -------------------------------------
             IF (.NOT. HDR_DONE) THEN
@@ -522,17 +614,21 @@ C--------- Population (individuals) & potential rate per area -----------
               WRITE(LUN_OUT,'(A)') '!'
               WRITE(LUN_OUT,'(A)') '!'
               WRITE(LUN_OUT, 25)
-   25         FORMAT('@YEAR  DOY   DAS   DAE',
+   25 FORMAT('@YEAR  DOY   DAS   DAE',
      &         '      LAIH      LWDh      RHU%      FTMP      LAIT',
-     &         '      SUM7 NSPRAYS     FACT     SEV%')
+     &         '      SUM7 NSPRAYS     FACT     SEV%',
+     &         '        SRCP        SPCL        SSCL        DSTO',
+     &         '        LSTO        NLTO')
             ENDIF
 
-            WRITE(LUN_OUT,
-     &       '(I5,I5,I6,I6,5F10.3,F10.1,I8,L9,F9.2)')
+      WRITE(LUN_OUT,
+     &       '(I5,I5,I6,I6,5F10.3,F10.1,I8,L9,F9.2,6F12.3)')
      &        IYEAR, IDOY, CONTROL%DAS, IDAP,
      &        HEALTH_LAI,
-     &        LWD, RH, FT, LAI_TOTAL, REAL(SUM7),
-     &        NSprays, FungActive, SEVERITY_PCT
+     &        LWD_OUT, RH_OUT, FT_OUT, LAI_TOTAL, REAL(SUM7),
+     &        NSprays, FungActive, SEVERITY_PCT,
+     &        SOURCE_PRESSURE, SPOR_CLOUD, SEC_SPORE_CLOUD,
+     &        DS_TOTAL, LS_TODAY, NEW_LOSS_TODAY
 
 !***********************************************************************
 !  SEASEND — called once (season end)
@@ -573,12 +669,15 @@ C--------- Population (individuals) & potential rate per area -----------
 ! ------ READ PARAMETERS
 !  keep parameter file consistent with columns order below.
      
-      SUBROUTINE READ_DISEASE_PARAMETERS(CONTROL,NDS,LESION_S,KVERHULST,
-     &                                  YMAX, COF_A, COF_B, 
+       SUBROUTINE READ_DISEASE_PARAMETERS(CONTROL,NDS,LESION_S,
+     &                                  KVERHULST,YMAX, COF_A, COF_B, 
      &                                  RVERHULST, TMIN_G, TOT_G,TMAX_G,
      &                                  TMIN_D, TOT_D, TMAX_D,    
      &                                  LDmin, LESIONAGEOPT, LESLIFEMAX,
-     &                                  DAE_START, beta, rrds, NCYCLE)
+     &                                  DAE_START, beta, rrds, NCYCLE,
+     &                                  DAE_START_PRESENT,
+     &                                  DISEASE_PARAMETERS_FOUND,
+     &                                  SRC_THR, CLD_THR)
 
           USE ModuleDefs
           IMPLICIT NONE
@@ -589,30 +688,47 @@ C--------- Population (individuals) & potential rate per area -----------
           REAL    NDS, LESION_S, KVERHULST, RVERHULST
           REAL    YMAX, COF_A, COF_B
           REAL    TMIN_G, TOT_G, TMAX_G
-          REAL    TMIN_D, TOT_D, TMAX_D
-          REAL    LDmin, LESIONAGEOPT, LESLIFEMAX, beta, rrds
-          INTEGER DAE_START
+           REAL    TMIN_D, TOT_D, TMAX_D
+           REAL    LDmin, LESIONAGEOPT, LESLIFEMAX, beta, rrds
+           REAL SRC_THR, CLD_THR
+           INTEGER DAE_START, DAE_FIRST, DAE_LAST, IOS_DAE, DAE_VALUE
+           INTEGER NCYCLE_FIRST, SRC_FIRST, CLD_FIRST, LESION_FIRST
+           INTEGER IOS_SRC, IOS_CLD
+           INTEGER NDS_FIRST, DAE_LABEL_FIRST, NCYCLE_LABEL_FIRST
+           INTEGER SRC_LABEL_FIRST, CLD_LABEL_FIRST, LESION_LABEL_FIRST
 
-          CHARACTER(LEN=8)   ID        
-          CHARACTER(LEN=20)  VRNAME    
-          CHARACTER(LEN=120) DISFIL
-          CHARACTER(LEN=400) LINE
-          CHARACTER(LEN=20)  TARGET_DISEASE
-           CHARACTER(LEN=1) NCYCLE
-          INTEGER LUN_DIS, IOS, STATE
-          LOGICAL FEXIST, FOUND_DISEASE
+           CHARACTER(LEN=8)   ID        
+           CHARACTER(LEN=20)  VRNAME    
+           CHARACTER(LEN=120) DISFIL
+           CHARACTER(LEN=400) LINE, VAR_HEADER, LINE_WORK
+           CHARACTER(LEN=40)  DAE_FIELD
+           CHARACTER(LEN=40)  SRC_FIELD, CLD_FIELD
+           CHARACTER(LEN=20)  TARGET_DISEASE
+            CHARACTER(LEN=1) NCYCLE
+           INTEGER LUN_DIS, IOS, STATE
+           LOGICAL FEXIST, FOUND_DISEASE, DAE_START_PRESENT
+           LOGICAL DISEASE_PARAMETERS_FOUND
+           LOGICAL SRC_PRESENT, CLD_PRESENT
 
 !         Only look in the local (current working) directory
-          DISFIL = 'disease_parameters.txt'
-          INQUIRE(FILE=TRIM(DISFIL), EXIST=FEXIST)
-          IF (.NOT. FEXIST) RETURN
+           DISFIL = 'disease_parameters.txt'
+           INQUIRE(FILE=TRIM(DISFIL), EXIST=FEXIST)
+           IF (.NOT. FEXIST) THEN
+               WRITE(*,'(A)')
+     &          'FATAL (DISMO): disease_parameters.txt was not found.'
+               STOP
+           END IF
 
           CALL GETLUN('DISINP', LUN_DIS)
           
           OPEN(LUN_DIS, FILE=TRIM(DISFIL), 
      &         STATUS='OLD', ACTION='READ', IOSTAT=IOS)
 
-          IF (IOS /= 0) RETURN
+           IF (IOS /= 0) THEN
+               WRITE(*,'(A)')
+     &          'FATAL (DISMO): Cannot open disease_parameters.txt.'
+               STOP
+           END IF
 
 !         --- State-machine driven parsing ---
 !         STATE 0 : searching for section tags
@@ -621,10 +737,26 @@ C--------- Population (individuals) & potential rate per area -----------
 !         STATE 3 : found *DISEASE DATABASE; waiting for @VAR# column header
 !         STATE 4 : reading database records
 
-          TARGET_DISEASE = ' '
-          STATE          = 0
-          FOUND_DISEASE  = .FALSE.
-          NCYCLE         = 'P' !default to policyclic 
+           TARGET_DISEASE = ' '
+           STATE          = 0
+           FOUND_DISEASE  = .FALSE.
+           DISEASE_PARAMETERS_FOUND = .FALSE.
+           DAE_START_PRESENT = .FALSE.
+           DAE_START = 0
+           VAR_HEADER = ' '
+           DAE_FIRST = 0
+           DAE_LAST = 0
+           NCYCLE_FIRST = 0
+           SRC_FIRST = 0
+           CLD_FIRST = 0
+           LESION_FIRST = 0
+           NDS_FIRST = 0
+           DAE_LABEL_FIRST = 0
+           NCYCLE_LABEL_FIRST = 0
+           SRC_LABEL_FIRST = 0
+           CLD_LABEL_FIRST = 0
+           LESION_LABEL_FIRST = 0
+           NCYCLE         = 'P' !default to policyclic 
 
           DO WHILE (.TRUE.)
               READ(LUN_DIS, '(A)', IOSTAT=IOS) LINE
@@ -650,33 +782,126 @@ C--------- Population (individuals) & potential rate per area -----------
                   TARGET_DISEASE = TRIM(LINE)
                   STATE = 0             ! continue searching for *DISEASE DATABASE
 
-              CASE (3)  ! found *DISEASE DATABASE; wait for @VAR# column header
-                  IF (LINE(1:1) .EQ. '@') STATE = 4
+               CASE (3)  ! found *DISEASE DATABASE; wait for @VAR# column header
+                   IF (LINE(1:1) .EQ. '@') THEN
+                       VAR_HEADER = LINE
+                       NDS_FIRST = INDEX(VAR_HEADER, 'NDS')
+                       DAE_LABEL_FIRST = INDEX(VAR_HEADER, 'DAE_START')
+                       NCYCLE_LABEL_FIRST = INDEX(VAR_HEADER, 'NCYCLE')
+                       SRC_LABEL_FIRST = INDEX(VAR_HEADER, 'SRC_THR')
+                       CLD_LABEL_FIRST = INDEX(VAR_HEADER, 'CLD_THR')
+                       LESION_LABEL_FIRST = INDEX(VAR_HEADER,'LESION_S')
+                       IF (NDS_FIRST .LE. 0 .OR.
+     &                     DAE_LABEL_FIRST .LE. NDS_FIRST .OR.
+     &                     NCYCLE_LABEL_FIRST .LE. DAE_LABEL_FIRST .OR.
+     &                     SRC_LABEL_FIRST .LE. NCYCLE_LABEL_FIRST .OR.
+     &                     CLD_LABEL_FIRST .LE. SRC_LABEL_FIRST .OR.
+     &                     LESION_LABEL_FIRST .LE. CLD_LABEL_FIRST) THEN
+                           WRITE(*,'(A)')
+     &                      'FATAL (DISMO): Invalid disease parameter '
+     &                      //'header order.'
+                           STOP
+                       END IF
 
-              CASE (4)  ! reading database records
-                  READ(LINE, *, IOSTAT=IOS) ID, VRNAME,
-     &                NDS, LESION_S, KVERHULST, RVERHULST,
+                       DAE_FIRST = NDS_FIRST + LEN('NDS')
+                       DAE_LAST = DAE_LABEL_FIRST + LEN('DAE_START') - 1
+                       NCYCLE_FIRST = DAE_LAST + 1
+                       SRC_FIRST = NCYCLE_LABEL_FIRST + LEN('NCYCLE')
+                       CLD_FIRST = SRC_LABEL_FIRST + LEN('SRC_THR')
+                       LESION_FIRST = CLD_LABEL_FIRST + LEN('CLD_THR')
+                       STATE = 4
+                   END IF
+
+               CASE (4)  ! reading database records
+                   DAE_START_PRESENT = .FALSE.
+                   DAE_VALUE = 0
+                   DAE_FIELD = ' '
+                   SRC_FIELD = ' '
+                   CLD_FIELD = ' '
+                   SRC_PRESENT = .FALSE.
+                   CLD_PRESENT = .FALSE.
+                   LINE_WORK = LINE
+
+                   IF (DAE_FIRST .GT. 0 .AND.
+     &                 DAE_LAST .GE. DAE_FIRST) THEN
+                       IF (DAE_FIRST .LE. LEN_TRIM(LINE)) THEN
+                           DAE_FIELD = LINE(DAE_FIRST:
+     &                         MIN(DAE_LAST,LEN(LINE)))
+                       END IF
+                       DAE_FIELD = ADJUSTL(DAE_FIELD)
+                        IF (LEN_TRIM(DAE_FIELD) .GT. 0) THEN
+                           READ(DAE_FIELD, *, IOSTAT=IOS_DAE) DAE_VALUE
+                           IF (IOS_DAE .EQ. 0) THEN
+                               DAE_START_PRESENT = .TRUE.
+                               DAE_START = DAE_VALUE
+                           ELSE
+                               WRITE(*,'(A)')
+     &                    'FATAL (DISMO): Invalid DAE_START value.'
+                               STOP
+                           END IF
+                        END IF
+                   END IF
+
+                   SRC_FIELD = LINE(SRC_FIRST:
+     &                         MIN(CLD_FIRST-1,LEN(LINE)))
+                   SRC_FIELD = ADJUSTL(SRC_FIELD)
+                   IF (LEN_TRIM(SRC_FIELD) .GT. 0) THEN
+                       READ(SRC_FIELD, *, IOSTAT=IOS_SRC) SRC_THR
+                       IF (IOS_SRC .EQ. 0) SRC_PRESENT = .TRUE.
+                   END IF
+
+                   CLD_FIELD = LINE(CLD_FIRST:
+     &                         MIN(LESION_FIRST-1,LEN(LINE)))
+                   CLD_FIELD = ADJUSTL(CLD_FIELD)
+                   IF (LEN_TRIM(CLD_FIELD) .GT. 0) THEN
+                       READ(CLD_FIELD, *, IOSTAT=IOS_CLD) CLD_THR
+                       IF (IOS_CLD .EQ. 0) CLD_PRESENT = .TRUE.
+                   END IF
+
+                   IF (.NOT. DAE_START_PRESENT .AND.
+     &                 DAE_FIRST .GT. 0 .AND.
+     &                 DAE_LAST .GE. DAE_FIRST) THEN
+                       LINE_WORK(DAE_FIRST:DAE_LAST) = ' '
+                       LINE_WORK(DAE_LAST:DAE_LAST) = '0'
+                   END IF
+
+                   READ(LINE_WORK, *, IOSTAT=IOS) ID, VRNAME,
+     &                NDS, DAE_START, NCYCLE, SRC_THR, CLD_THR,
+     &                LESION_S, KVERHULST, RVERHULST,
      &                YMAX, COF_A, COF_B,
      &                TMIN_G, TOT_G, TMAX_G,
      &                TMIN_D, TOT_D, TMAX_D,
      &                LDmin, LESIONAGEOPT, LESLIFEMAX,
-     &                DAE_START, beta, rrds, NCYCLE
-                  IF (IOS .EQ. 0 .AND.
-     &                TRIM(VRNAME) .EQ. TRIM(TARGET_DISEASE)) THEN
-                      FOUND_DISEASE = .TRUE.
-                      EXIT
-                  END IF
+     &                beta, rrds
+                   IF (IOS .NE. 0) THEN
+                       WRITE(*,'(A)')
+     &                  'FATAL (DISMO):Invalid disease parameter record'
+                       STOP
+                   END IF
+
+                   IF (TRIM(VRNAME) .EQ. TRIM(TARGET_DISEASE)) THEN
+                       FOUND_DISEASE = .TRUE.
+                       DISEASE_PARAMETERS_FOUND = .TRUE.
+                       EXIT
+                   END IF
 
               END SELECT
           END DO
 
-          CLOSE(LUN_DIS)
+           CLOSE(LUN_DIS)
 
-          IF (.NOT. FOUND_DISEASE) THEN
-              WRITE(*,'(A,A)')
-     &            'WARNING (DISMO): disease not found in database: ',
+           IF (STATE .NE. 4) THEN
+               WRITE(*,'(A)')
+     &          'FATAL (DISMO): Invalid disease parameter header.'
+               STOP
+           END IF
+
+           IF (.NOT. FOUND_DISEASE) THEN
+               WRITE(*,'(A,A)')
+     &            'FATAL (DISMO): disease not found in database: ',
      &            TRIM(TARGET_DISEASE)
-          END IF
+               STOP
+           END IF
 
        END SUBROUTINE READ_DISEASE_PARAMETERS
 
@@ -690,27 +915,37 @@ C--------- Population (individuals) & potential rate per area -----------
 !  by the DSSAT input module for the active treatment.
 !-----------------------------------------------------------------------
 
-      SUBROUTINE DISMO_PRESEASON(CONTROL, NDS, TMIN_G, TOT_G, TMAX_G,
+       SUBROUTINE DISMO_PRESEASON(CONTROL, TMIN_G, TOT_G, TMAX_G,
      &    TMIN_D, TOT_D, TMAX_D, USE_WTH_RH, SPOR_DECAY,SOURCE_PRESSURE,
-     &    SPOR_CLOUD, REGIONAL_HISTORY, HIST_IDX)
+     &    SPOR_CLOUD, PRESEASON_DATE, PRESEASON_RH, PRESEASON_LWD,
+     &    PRESEASON_FT, PRESEASON_COUNT, MAXPRESEASON,
+     &    DISEASE_PARAMETERS_FOUND, DAE_START_PRESENT,
+     &    AUTO_TT, AUTO_BUP_RATE, AUTO_SOURCE_PRESSURE,
+     &    AUTO_SPOR_CLOUD, AUTO_LOOKBACK_DAYS)
 
       USE ModuleDefs
-      IMPLICIT NONE
-      EXTERNAL GETLUN, DISMO_UPDATE_ENVIRONMENT,
-     &         DISMO_NORMALIZE_DATE, DISMO_READ_WTH_FIELD
+       IMPLICIT NONE
+       EXTERNAL GETLUN, DISMO_UPDATE_ENVIRONMENT,
+     &         DISMO_NORMALIZE_DATE, DISMO_READ_WTH_FIELD,
+     &         DISMO_SHIFT_DATE
 
       TYPE (ControlType) CONTROL
 
-      REAL NDS, TMIN_G, TOT_G, TMAX_G, TMIN_D, TOT_D, TMAX_D
-      REAL SPOR_DECAY, SOURCE_PRESSURE, SPOR_CLOUD
-      REAL WTMAX, WTMIN, WRH, DAILY_IP, T, LWD, FT, FT_D, FT_G
-      REAL, DIMENSION(60) :: REGIONAL_HISTORY
-      INTEGER HIST_IDX
-      LOGICAL USE_WTH_RH, FOUND_HEADER, IN_PLANTING
-      LOGICAL OK_TMAX, OK_TMIN, OK_RH
-      INTEGER LUN_IO, LUN_WTH, IOS, WTH_DATE, FULL_DATE
-      INTEGER POS_TMAX, POS_TMIN, POS_RAIN, POS_RHUM
-      INTEGER PRESEASON_PDATE
+       REAL TMIN_G, TOT_G, TMAX_G, TMIN_D, TOT_D, TMAX_D
+       REAL SPOR_DECAY, SOURCE_PRESSURE, SPOR_CLOUD
+       REAL WTMAX, WTMIN, WRH, DAILY_IP, T, LWD, FT, FT_D, FT_G
+       REAL AUTO_TT, AUTO_BUP_RATE, AUTO_SOURCE_PRESSURE
+       REAL AUTO_SPOR_CLOUD
+       INTEGER MAXPRESEASON, PRESEASON_COUNT, AUTO_LOOKBACK_DAYS
+       INTEGER, DIMENSION(MAXPRESEASON) :: PRESEASON_DATE
+       REAL, DIMENSION(MAXPRESEASON) :: PRESEASON_RH, PRESEASON_LWD
+       REAL, DIMENSION(MAXPRESEASON) :: PRESEASON_FT
+       LOGICAL USE_WTH_RH, FOUND_HEADER, IN_PLANTING
+       LOGICAL OK_TMAX, OK_TMIN, OK_RH
+       LOGICAL DISEASE_PARAMETERS_FOUND, DAE_START_PRESENT
+       INTEGER LUN_IO, LUN_WTH, IOS, WTH_DATE, FULL_DATE
+       INTEGER POS_TMAX, POS_TMIN, POS_RAIN, POS_RHUM
+       INTEGER PRESEASON_PDATE, AUTO_START_DATE
       CHARACTER(LEN=400) LINE, WTH_HEADER
       CHARACTER(LEN=30) WTH_NAME
       CHARACTER(LEN=120) WTH_PATH
@@ -762,13 +997,20 @@ C--------- Population (individuals) & potential rate per area -----------
       END DO
       CLOSE(LUN_IO)
 
-      IF (LEN_TRIM(WTH_NAME) .EQ. 0 .OR.
+       IF (LEN_TRIM(WTH_NAME) .EQ. 0 .OR.
      &    PRESEASON_PDATE .LE. CONTROL%YRSIM) THEN
           WRITE(*,'(A)')
      &      'WARNING (DISMO): Preseason weather or planting date '
      &      //'was not found; reconstruction skipped.'
-          RETURN
-      END IF
+           RETURN
+       END IF
+
+       AUTO_START_DATE = PRESEASON_PDATE
+       IF (DISEASE_PARAMETERS_FOUND .AND.
+     &     (.NOT. DAE_START_PRESENT)) THEN
+           CALL DISMO_SHIFT_DATE(PRESEASON_PDATE,
+     &          AUTO_LOOKBACK_DAYS, AUTO_START_DATE)
+       END IF
 
       IF (LEN_TRIM(WTH_PATH) .EQ. 0) THEN
           WTH_FILE = TRIM(WTH_NAME)
@@ -846,13 +1088,32 @@ C--------- Population (individuals) & potential rate per area -----------
               OK_RH = .TRUE.
           END IF
 
-          IF (OK_TMAX .AND. OK_TMIN .AND. OK_RH) THEN
-              CALL DISMO_UPDATE_ENVIRONMENT(WTMIN, WTMAX, WRH,
-     &             USE_WTH_RH, NDS, TMIN_G, TOT_G, TMAX_G,
+           IF (OK_TMAX .AND. OK_TMIN .AND. OK_RH) THEN
+                CALL DISMO_UPDATE_ENVIRONMENT(WTMIN, WTMAX, WRH,
+     &             USE_WTH_RH, TMIN_G, TOT_G, TMAX_G,
      &             TMIN_D, TOT_D, TMAX_D, SPOR_DECAY, DAILY_IP,
-     &             SOURCE_PRESSURE, SPOR_CLOUD, T, LWD, FT, FT_D, FT_G,
-     &             REGIONAL_HISTORY, HIST_IDX)
-          END IF
+     &             SOURCE_PRESSURE, SPOR_CLOUD, T, LWD, FT, FT_D, FT_G)
+
+               IF (DISEASE_PARAMETERS_FOUND .AND.
+     &             (.NOT. DAE_START_PRESENT) .AND.
+     &             FULL_DATE .GE. AUTO_START_DATE) THEN
+                   AUTO_BUP_RATE = MAX(FT_G, 0.0) *
+     &                MIN(MAX(LWD / 24.0, 0.0), 1.0)
+                   AUTO_TT = AUTO_TT + AUTO_BUP_RATE
+                   AUTO_SOURCE_PRESSURE =
+     &                AUTO_SOURCE_PRESSURE * 0.98 + AUTO_BUP_RATE
+                   AUTO_SPOR_CLOUD = AUTO_SPOR_CLOUD * SPOR_DECAY +
+     &                (1.0 - SPOR_DECAY) * AUTO_BUP_RATE
+               END IF
+
+               IF (PRESEASON_COUNT .LT. MAXPRESEASON) THEN
+                  PRESEASON_COUNT = PRESEASON_COUNT + 1
+                  PRESEASON_DATE(PRESEASON_COUNT) = FULL_DATE
+                  PRESEASON_RH(PRESEASON_COUNT) = WRH
+                  PRESEASON_LWD(PRESEASON_COUNT) = LWD
+                  PRESEASON_FT(PRESEASON_COUNT) = FT
+              END IF
+           END IF
       END DO
       CLOSE(LUN_WTH)
 
@@ -869,23 +1130,20 @@ C--------- Population (individuals) & potential rate per area -----------
 !-----------------------------------------------------------------------
 
       SUBROUTINE DISMO_UPDATE_ENVIRONMENT(TMIN, TMAX, RH,
-     &    USE_WTH_RH, NDS, TMIN_G, TOT_G, TMAX_G,
+     &    USE_WTH_RH, TMIN_G, TOT_G, TMAX_G,
      &    TMIN_D, TOT_D, TMAX_D, SPOR_DECAY, DAILY_IP,
-     &    SOURCE_PRESSURE, SPOR_CLOUD, T, LWD, FT, FT_D, FT_G,
-     &    REGIONAL_HISTORY, HIST_IDX)
+     &    SOURCE_PRESSURE, SPOR_CLOUD, T, LWD, FT, FT_D, FT_G)
 
       USE ModuleDefs
       IMPLICIT NONE
       EXTERNAL F_TAVG, F_DEW, F_RH, F_LWD, T_DEV
 
-      REAL TMIN, TMAX, RH, NDS, TMIN_G, TOT_G, TMAX_G
+      REAL TMIN, TMAX, RH, TMIN_G, TOT_G, TMAX_G
       REAL TMIN_D, TOT_D, TMAX_D, SPOR_DECAY
       REAL DAILY_IP, SOURCE_PRESSURE, SPOR_CLOUD, T, LWD, FT, FT_D, FT_G
       REAL TDEW, ES, E, RH_LOCAL
+      REAL, PARAMETER :: SURV_RATE = 0.98
       LOGICAL USE_WTH_RH
-      
-      REAL, DIMENSION(60) :: REGIONAL_HISTORY
-      INTEGER :: HIST_IDX
 
       CALL F_TAVG(TMAX, TMIN, T)
       RH_LOCAL = RH
@@ -897,16 +1155,8 @@ C--------- Population (individuals) & potential rate per area -----------
       CALL T_DEV(T, TMIN_G, TOT_G, TMAX_G, TMIN_D, TOT_D,
      &    TMAX_D, FT, FT_D, FT_G)
 
-      DAILY_IP = NDS * FT_G * (LWD / 24.0)
-      SOURCE_PRESSURE = MAX(SOURCE_PRESSURE - 
-     &                  REGIONAL_HISTORY(HIST_IDX), 0.0)
-      
-      REGIONAL_HISTORY(HIST_IDX) = DAILY_IP
-      SOURCE_PRESSURE = SOURCE_PRESSURE + DAILY_IP
-      
-      HIST_IDX = HIST_IDX + 1
-      IF (HIST_IDX .GT. 60) HIST_IDX = 1
-      
+      DAILY_IP = FT_G * (LWD / 24.0)
+      SOURCE_PRESSURE = SOURCE_PRESSURE * SURV_RATE + DAILY_IP
       SPOR_CLOUD = (SPOR_CLOUD * SPOR_DECAY) + DAILY_IP
 
       END SUBROUTINE DISMO_UPDATE_ENVIRONMENT
@@ -931,7 +1181,44 @@ C--------- Population (individuals) & potential rate per area -----------
       END IF
       FULL_DATE = IYEAR * 1000 + IDOY
 
-      END SUBROUTINE DISMO_NORMALIZE_DATE
+       END SUBROUTINE DISMO_NORMALIZE_DATE
+
+!-----------------------------------------------------------------------
+!  Shift a YYYYDDD date backward by OFFSET_DAYS.
+!-----------------------------------------------------------------------
+
+      SUBROUTINE DISMO_SHIFT_DATE(FULL_DATE, OFFSET_DAYS, NEW_DATE)
+
+      IMPLICIT NONE
+      INTEGER FULL_DATE, OFFSET_DAYS, NEW_DATE
+      INTEGER IYEAR, IDOY, DAYS_IN_YEAR, DAYS_LEFT
+      LOGICAL LEAP_YEAR
+
+      IYEAR = FULL_DATE / 1000
+      IDOY = FULL_DATE - IYEAR * 1000
+      DAYS_LEFT = MAX(OFFSET_DAYS, 0)
+
+      DO WHILE (DAYS_LEFT .GT. 0)
+          IF (IDOY .GT. DAYS_LEFT) THEN
+              IDOY = IDOY - DAYS_LEFT
+              DAYS_LEFT = 0
+          ELSE
+              DAYS_LEFT = DAYS_LEFT - IDOY
+              IYEAR = IYEAR - 1
+              LEAP_YEAR = MOD(IYEAR,400) .EQ. 0 .OR.
+     &          (MOD(IYEAR,4) .EQ. 0 .AND. MOD(IYEAR,100) .NE. 0)
+              IF (LEAP_YEAR) THEN
+                  DAYS_IN_YEAR = 366
+              ELSE
+                  DAYS_IN_YEAR = 365
+              END IF
+              IDOY = DAYS_IN_YEAR
+          END IF
+      END DO
+
+      NEW_DATE = IYEAR * 1000 + IDOY
+
+      END SUBROUTINE DISMO_SHIFT_DATE
 
 !-----------------------------------------------------------------------
 !  Read one fixed-width value from a DSSAT WTH record.
@@ -1355,6 +1642,7 @@ C--------- Population (individuals) & potential rate per area -----------
 ! LAI_MIN_START     : Minimal LAI to allow activity (substrate safeguard)
 ! MAXDAYS           : Max internal history length (days)
 ! EPS               : Small epsilon for safe divisions
+! DAE_W             : Width of the primary-host activation ramp (days)
 
 ! --------------------------- Locals (scalars) -------------------------
 ! DAS               : Days after sowing (from CONTROL)
@@ -1372,6 +1660,9 @@ C--------- Population (individuals) & potential rate per area -----------
 ! LAF (0..1)        : Lesion-age factor
 ! PREV_IS (m2 m-2)  : Infectious surface yesterday
 ! LWD (h)           : Leaf wetness duration (capped at 24 h)
+! DAILY_IP (0..1)   : Daily climate favorability for the regional source
+! SOURCE_PRESSURE   : First-order-decayed cumulative climate favorability
+! SPOR_CLOUD (0..1) : Regional climate-driven cloud, before NDS scaling
 ! Tdew (°C)         : Dew point temperature (for optional RH calc)
 ! Es, E             : Saturation and actual vapor pressure (Tetens; RH calc)
 ! HEALTH_LAI (m2 m-2)      : Healthy/susceptible LAI at day start
@@ -1387,7 +1678,7 @@ C--------- Population (individuals) & potential rate per area -----------
 ! POT_SPO_PER_AREA (sp m-2 d-1 per m2 m-2):
 !                     Potential secondary spores per unit sporulating area
 ! PS_K (spores m-2)  : Secondary spores contributed by cohort k today
-! NDS (spores m-2)   : Primary dispersed spores (from parameter file)
+! NDS (spores m-2)   : Depositable spores per unit regional cloud
 ! LESION_S (m2)      : Average lesion surface area
 ! KVERHULST (#/LAI)  : Carrying capacity per unit LAI (population space)
 ! RVERHULST (d-1)    : Intrinsic logistic rate (population space)
@@ -1397,11 +1688,11 @@ C--------- Population (individuals) & potential rate per area -----------
 ! LDMin (d)          : Minimum latency (used to scale LR)
 ! LESLIFEMAX (d)     : Max lesion lifespan (caps aging)
 ! DAE                : Days after emergence (internal counter)
-! DAE_START          : DAE at which disease becomes active
+! DAE_START          : Midpoint (DAE) of the primary-host activation ramp
 ! KMAX               : Upper bound for cohort loop (≤ MIN(DAE,MAXDAYS))
 ! DAE_IDX, PREV_IDX  : Indices for today and yesterday in history arrays
 ! PLANT_LIVE         : 1 while crop is alive (after emergence gate)
-! DISEASE_LIVE       : 1 after disease activation gate (DAE ≥ DAE_START)
+! DISEASE_LIVE       : 1 while crop is live and LAI_TOTAL ≥ LAI_MIN_START
 ! DVIP_today         : Daily infection-probability class (0..3)
 ! idx (1..7)         : Circular index for 7-day DVIP buffer
 ! SUM7               : Sum of last seven DVIP classes
