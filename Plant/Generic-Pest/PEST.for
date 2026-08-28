@@ -120,9 +120,6 @@ C     Photosynthesis Variables
       REAL TPSR, PPSR, CASM, ASMDOT
       REAL PGAVL
 C     DISMO state arrays
-      REAL, DIMENSION(200,5) :: ESP_LAT_HIST_P
-      REAL, DIMENSION(200)   :: SUP_INF_LIST_P
-      REAL, DIMENSION(200)   :: LAI_INF_LIST_P
       REAL    DISEASE_LAI_DISMO
       REAL    VPHOTF_DISMO, WLIDOT_DISMO
       REAL    TMIN_DIS, TMAX_DIS, RHUM_DIS, XLAI_DIS
@@ -181,16 +178,12 @@ C-----------------------------------------------------------------------
      &    PCPID, PCTID, PDCF1, PID)                       !Output
 
       IF (RUN_DISMO) THEN
-        ESP_LAT_HIST_P = 0.0
-        SUP_INF_LIST_P = 0.0
-        LAI_INF_LIST_P = 0.0
         DISEASE_LAI_DISMO = 0.0
         VPHOTF_DISMO = 1.0
       
       CALL DISEASE_LEAF(RUNINIT,
      &    CONTROL, ISWITCH, 0.0, 0.0, 0.0,
      &    0.0, 0.0, 0.0,
-     &    ESP_LAT_HIST_P, SUP_INF_LIST_P, LAI_INF_LIST_P,
      &    YRDOY, 0, 0, 0,
      &    DISEASE_LAI_DISMO, VPHOTF_DISMO, WLIDOT_DISMO)
       ENDIF
@@ -272,9 +265,6 @@ C-----------------------------------------------------------------------
 C     DISMO seasonal initialization
 C-----------------------------------------------------------------------
       IF (RUN_DISMO) THEN
-        ESP_LAT_HIST_P = 0.0
-        SUP_INF_LIST_P = 0.0
-        LAI_INF_LIST_P = 0.0
         DISEASE_LAI_DISMO = 0.0
         VPHOTF_DISMO = 1.0
         WLIDOT_DISMO = 0.0
@@ -291,7 +281,6 @@ C-----------------------------------------------------------------------
         CALL DISEASE_LEAF(SEASINIT,
      &    CONTROL, ISWITCH, TMIN_DIS, TMAX_DIS, RHUM_DIS,
      &    XLAI_DIS, WTLF, SLDOT,
-     &    ESP_LAT_HIST_P, SUP_INF_LIST_P, LAI_INF_LIST_P,
      &    YRDOY, YREMRG_DIS, NVEG0_DIS, YREND_DIS,
      &    DISEASE_LAI_DISMO, VPHOTF_DISMO, WLIDOT_DISMO)
       ENDIF
@@ -318,7 +307,6 @@ C-----------------------------------------------------------------------
         CALL DISEASE_LEAF(RATE,
      &    CONTROL, ISWITCH, TMIN_DIS, TMAX_DIS, RHUM_DIS,
      &    XLAI_DIS, WTLF, SLDOT,
-     &    ESP_LAT_HIST_P, SUP_INF_LIST_P, LAI_INF_LIST_P,
      &    YRDOY, YREMRG_DIS, NVEG0_DIS, YREND_DIS,
      &    DISEASE_LAI_DISMO, VPHOTF_DISMO, WLIDOT_DISMO)
 
@@ -465,7 +453,6 @@ C-----------------------------------------------------------------------
         CALL DISEASE_LEAF(DYNAMIC,
      &    CONTROL, ISWITCH, TMIN_DIS, TMAX_DIS, RHUM_DIS,
      &    XLAI_DIS, WTLF, SLDOT,
-     &    ESP_LAT_HIST_P, SUP_INF_LIST_P, LAI_INF_LIST_P,
      &    YRDOY, YREMRG_DIS, NVEG0_DIS, YREND_DIS,
      &    DISEASE_LAI_DISMO, VPHOTF_DISMO, WLIDOT_DISMO)
       ENDIF

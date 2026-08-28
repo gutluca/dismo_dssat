@@ -19,21 +19,24 @@ C  06/25/2026 Improved output file formatting
 C  07/17/2026 Added defoliation/senescence logic
 C  07/28/2026 Added monocyclic disease support (NCYCLE parameter: M/P)
 C  08/24/2026 Added pre-plant environmental inoculum reconstruction.
-C  08/27/2026 Primary inoculum arrival: FAV_SUM latch + finite pool.
+C  08/28/2026 Lesion expansion: a cohort's necrotic area now accrues
+C             over the lesion-age curve instead of being charged in
+C             full on the day latency ends.
+C  08/27/2026 Primary inoculum arrival: FAV_SUM latch + finite pool;
+C             DEP_FRAC spreads deposition over days.
 C             DAE_START now sets the arrival day when the user has an
 C             observed onset; FAV_THR decides it otherwise.
 C-----------------------------------------------------------------------
       SUBROUTINE DISEASE_LEAF (DYNAMIC,
      &    CONTROL, ISWITCH, Tmin, Tmax, RH, LAI_TOTAL,    ! Input
      &    WTLF, SLDOT,
-     &    ESP_LAT_HIST, SUP_INF_LIST, LAI_INF_LIST,       ! Input/State
      &    YRDOY, YREMRG, NVEG0, YREND,                    ! Input
      &    DISEASE_LAI, VIRTUAL_PHOTO_FACTOR,              ! Output
      &    DISEASE_SEN_RATE)                               ! Output
 C-----------------------------------------------------------------------
       USE ModuleDefs
       IMPLICIT NONE
-      EXTERNAL F_IR, F_DS, F_CANSPO, F_LR, F_LS, F_LAF,
+      EXTERNAL F_IR, F_DS, F_CANSPO, F_LR, F_LS, F_LAF, F_LEXP,
      &         F_LAR, F_PPSR_POP, APPLY_FUNGICIDE, CALC_DVIP,
      &         READ_DISEASE_PARAMETERS, F_VIRTUAL_LESIONS,
      &         F_SEVERITY, GETLUN, F_DEFOLIATION,
@@ -51,15 +54,11 @@ C  Named columns of the cohort array
       INTEGER, PARAMETER :: C_LATP = 2   ! latency progress (0..1)
       INTEGER, PARAMETER :: C_INFF = 3   ! infectious flag (0/1)
       INTEGER, PARAMETER :: C_AGE  = 4   ! relative lesion age (0..1)
-      INTEGER, PARAMETER :: C_SEC  = 5   ! secondary emission that day
  
 C----- Dummy arguments -------------------------------------------------
       INTEGER DYNAMIC
       REAL    Tmin, Tmax, RH, LAI_TOTAL
       REAL    WTLF, SLDOT
-      REAL    ESP_LAT_HIST(MAXDAYS,5)
-      REAL    SUP_INF_LIST(MAXDAYS)
-      REAL    LAI_INF_LIST(MAXDAYS)
       INTEGER YRDOY, YREMRG, NVEG0, YREND
       REAL    DISEASE_LAI, VIRTUAL_PHOTO_FACTOR, DISEASE_SEN_RATE
  
@@ -73,7 +72,7 @@ C----- Calibrated parameters
       REAL    TMIN_D, TOT_D, TMAX_D
       REAL    LDMIN, LESIONAGEOPT, LESLIFEMAX
       REAL    BETA, RRDS
-      REAL    SRC_HALF, FAV_THR, NDS
+      REAL    SRC_HALF, FAV_THR, NDS, DEP_FRAC
       INTEGER DAE_MIN
       LOGICAL DAE_MIN_PRESENT, IS_MONOCYCLIC
       CHARACTER(LEN=1) NCYCLE
@@ -100,6 +99,7 @@ C----- Environmental state -----------
 C----- Epidemic state (season scope) -----------------------------------
       REAL    LAI_PEAK_SEASON, CUM_NECROTIC, PREV_IS
       REAL    SEVERITY_PCT
+      REAL    ESP_LAT_HIST(MAXDAYS,4)
       REAL    ADMITTED_AREA(MAXDAYS)
       INTEGER DAE, PLANT_LIVE, N_ACTIVE_COH
       INTEGER SLOT_DAE(MAXDAYS)
@@ -117,6 +117,7 @@ C----- Daily working variables --------------------------------
       REAL    T, LWD, FT, FT_D, FT_G, DAILY_IP
       REAL    RH_OUT, LWD_OUT, FT_OUT, FAV_OUT
       REAL    IR, FSS, LR, LA, LAF, Lesion_Rate
+      REAL    EXPN, EXPN_PREV, AREA_GROW
       REAL    HEALTH_LAI, LAI_SUSC, LAI_AVAIL, NEW_LOSS_TODAY
       REAL    IS, ESP_INOC_SEC, INF_AREA_K, LES_COUNT_PREV
       REAL    POT_SPO_PER_AREA, PS_K
@@ -162,7 +163,7 @@ C  Fungicide block -- move to the FILEX management section later.
      &         TMIN_G, TOT_G, TMAX_G, TMIN_D, TOT_D, TMAX_D,
      &         LDMIN, LESIONAGEOPT, LESLIFEMAX, BETA, RRDS,
      &         NCYCLE, DAE_MIN, DAE_MIN_PRESENT,
-     &         SRC_HALF, FAV_THR, NDS)
+     &         SRC_HALF, FAV_THR, NDS, DEP_FRAC)
 
           IS_MONOCYCLIC = (NCYCLE .EQ. 'M')
 
@@ -198,8 +199,7 @@ C  Fungicide block -- move to the FILEX management section later.
           IS       = 0.0
  
           CALL DISMO_SEASON_RESET(MAXDAYS,
-     &         ESP_LAT_HIST, SUP_INF_LIST, LAI_INF_LIST,
-     &         ADMITTED_AREA, SLOT_DAE,
+     &         ESP_LAT_HIST, ADMITTED_AREA, SLOT_DAE,
      &         DAE, PLANT_LIVE, N_ACTIVE_COH,
      &         LAI_PEAK_SEASON, CUM_NECROTIC, PREV_IS, SEVERITY_PCT,
      &         DVIP_pts, idx, SUM7, BufferDays, ResidualDays,
@@ -230,8 +230,7 @@ C***********************************************************************
       ELSEIF (DYNAMIC .EQ. SEASINIT) THEN
  
           CALL DISMO_SEASON_RESET(MAXDAYS,
-     &         ESP_LAT_HIST, SUP_INF_LIST, LAI_INF_LIST,
-     &         ADMITTED_AREA, SLOT_DAE,
+     &         ESP_LAT_HIST, ADMITTED_AREA, SLOT_DAE,
      &         DAE, PLANT_LIVE, N_ACTIVE_COH,
      &         LAI_PEAK_SEASON, CUM_NECROTIC, PREV_IS, SEVERITY_PCT,
      &         DVIP_pts, idx, SUM7, BufferDays, ResidualDays,
@@ -276,7 +275,11 @@ C-----------------------------------------------------------------------
      &         SRC_SURV, DAILY_IP, SOURCE_PRESSURE, FAV_SUM,
      &         T, LWD, FT, FT_D, FT_G)
  
-C  Yesterday's emission becomes airborne today.
+C  Airborne inoculum ages every day, canopy or no canopy.  Both
+C  stores are aged in the same place so neither can freeze on a day
+C  when deposition happens to be impossible.  Yesterday's emission
+C  becomes airborne now.
+          PRI_POOL        = PRI_POOL * SPOR_DECAY
           SEC_SPORE_CLOUD = SEC_SPORE_CLOUD * SEC_DECAY
      &                      + SEC_SPORES_PENDING
           SEC_SPORES_PENDING = 0.0
@@ -339,7 +342,8 @@ C-----------------------------------------------------------------------
 C  --- primary inoculum arrival --------------------------------------
 C  The regional source is an EVENT, not a permanently open tap: it
 C  fires once per season and releases a finite pool NDS * F_SOURCE.
-C  The pool then decays at SPOR_DECAY and is depleted by deposition,
+C  The pool then drains over several days -- DEP_FRAC of it settles
+C  onto the canopy each day and the rest decays at SPOR_DECAY --
 C  exactly like the secondary cloud, so the epidemic that follows is
 C  carried by the secondary cycle rather than by external influx.
 C
@@ -378,7 +382,8 @@ C  separately identifiable against a severity objective.
               IF (CLOUD_TOTAL .GT. EPS) THEN
 C  Both sources compete for the green area present today;
 C  DS = MIN(cloud, canopy interception capacity).
-                  CALL F_CANSPO(HEALTH_LAI, CLOUD_TOTAL, LESION_S, FSS)
+                  CALL F_CANSPO(HEALTH_LAI, CLOUD_TOTAL, LESION_S,
+     &                          DEP_FRAC, FSS)
                   CALL F_DS(FSS, CLOUD_TOTAL, DS_TOTAL)
                   DS_PRI = DS_TOTAL * PRI_CLOUD / CLOUD_TOTAL
                   DS_SEC = DS_TOTAL * SEC_CLOUD / CLOUD_TOTAL
@@ -387,8 +392,6 @@ C  what lands on the canopy and by their own daily decay.
                   SEC_SPORE_CLOUD = MAX(SEC_SPORE_CLOUD - DS_SEC, 0.0)
                   PRI_POOL        = MAX(PRI_POOL        - DS_PRI, 0.0)
               END IF
-
-              PRI_POOL = PRI_POOL * SPOR_DECAY
 
               CALL F_IR(FT, LWD, YMAX, COF_A, COF_B, IR)
               IF (FungActive) IR = IR * (1.0 - FUNG_EFFICIENCY)
@@ -427,6 +430,17 @@ C  depend on k -- hoisted out of the loop
                   ESP_LAT_HIST(k, C_LATP) = ESP_LAT_HIST(k, C_LATP)+LR
  
 C  --- latent to infectious (once) ---
+C  ADMITTED_AREA(k) is the cohort's FINAL footprint: the area those
+C  lesions occupy once fully expanded.  It is fixed here, capped by
+C  the leaf area still available, and drives sporulation from this day
+C  on exactly as before.  It is NOT charged to the necrosis here.  A
+C  lesion that has just broken latency is a fleck, not a full lesion;
+C  it reaches its final size at LESIONAGEOPT -- the same age at which
+C  the model already places peak sporulation.  Charging the whole
+C  footprint on the day latency ends made necrosis a step while
+C  sporulation stayed a ramp, and that phase gap is what produced the
+C  early severity shoulder.  The area is therefore accrued day by day
+C  in the infectious block below, on the same lesion-age clock.
                   IF ((ESP_LAT_HIST(k, C_LATP) .GE. 1.0) .AND.
      &                (ESP_LAT_HIST(k, C_INFF) .LT. 0.5)) THEN
                       ESP_LAT_HIST(k, C_INFF) = 1.0
@@ -434,8 +448,6 @@ C  --- latent to infectious (once) ---
      &                             * LESION_S
                       LAI_AVAIL  = MAX(LAI_SUSC - NEW_LOSS_TODAY, 0.0)
                       ADMITTED_AREA(k) = MIN(INF_AREA_K, LAI_AVAIL)
-                      NEW_LOSS_TODAY   = NEW_LOSS_TODAY
-     &                                   + ADMITTED_AREA(k)
                   END IF
  
 C  --- infectious phase ---
@@ -456,6 +468,21 @@ C  stays in CUM_NECROTIC -- necrosis is permanent.
                       CALL F_LAF(LA, LAF, LESIONAGEOPT)
                       INF_AREA_K = ADMITTED_AREA(k)
                       IS = IS + INF_AREA_K
+
+C  --- lesion expansion: this cohort's share of today's necrosis ---
+C  Only the INCREMENT of the expanded fraction turns necrotic today.
+C  Over the cohort's life the increments sum to ADMITTED_AREA(k)
+C  exactly -- expansion always completes before the lesion retires --
+C  so the total necrosis a cohort produces is unchanged.  Only its
+C  arrival is spread over the expansion period.
+                      CALL F_LEXP(LA, LESIONAGEOPT, EXPN)
+                      CALL F_LEXP(LA - Lesion_Rate, LESIONAGEOPT,
+     &                            EXPN_PREV)
+                      AREA_GROW = ADMITTED_AREA(k)
+     &                            * MAX(EXPN - EXPN_PREV, 0.0)
+                      AREA_GROW = MIN(AREA_GROW,
+     &                            MAX(LAI_SUSC - NEW_LOSS_TODAY, 0.0))
+                      NEW_LOSS_TODAY = NEW_LOSS_TODAY + AREA_GROW
  
                       IF ((.NOT. IS_MONOCYCLIC) .AND.
      &                    (POT_SPO_PER_AREA .GT. 0.0) .AND.
@@ -490,7 +517,6 @@ C  --- register today's new infections ---
  
               IF (.NOT. IS_MONOCYCLIC) THEN
                   SEC_SPORES_PENDING = MAX(ESP_INOC_SEC, 0.0)
-                  ESP_LAT_HIST(DAE_IDX, C_SEC) = SEC_SPORES_PENDING
               ELSE
                   SEC_SPORES_PENDING = 0.0
               END IF
@@ -506,8 +532,6 @@ C-----------------------------------------------------------------------
      &                       LAI_PEAK_SEASON)
           PREV_IS      = IS
  
-          SUP_INF_LIST(DAE_IDX) = IS
-          LAI_INF_LIST(DAE_IDX) = CUM_NECROTIC
  
           CALL F_SEVERITY(CUM_NECROTIC, LAI_PEAK_SEASON, SEVERITY_PCT)
  
@@ -631,8 +655,7 @@ C***********************************************************************
       ELSEIF (DYNAMIC .EQ. SEASEND) THEN
  
           CALL DISMO_SEASON_RESET(MAXDAYS,
-     &         ESP_LAT_HIST, SUP_INF_LIST, LAI_INF_LIST,
-     &         ADMITTED_AREA, SLOT_DAE,
+     &         ESP_LAT_HIST, ADMITTED_AREA, SLOT_DAE,
      &         DAE, PLANT_LIVE, N_ACTIVE_COH,
      &         LAI_PEAK_SEASON, CUM_NECROTIC, PREV_IS, SEVERITY_PCT,
      &         DVIP_pts, idx, SUM7, BufferDays, ResidualDays,
@@ -657,8 +680,7 @@ C***********************************************************************
 !  SEASON RESET
 !-----------------------------------------------------------------------
       SUBROUTINE DISMO_SEASON_RESET(MAXDAYS,
-     &    ESP_LAT_HIST, SUP_INF_LIST, LAI_INF_LIST,
-     &    ADMITTED_AREA, SLOT_DAE,
+     &    ESP_LAT_HIST, ADMITTED_AREA, SLOT_DAE,
      &    DAE, PLANT_LIVE, N_ACTIVE_COH,
      &    LAI_PEAK_SEASON, CUM_NECROTIC, PREV_IS, SEVERITY_PCT,
      &    DVIP_pts, idx, SUM7, BufferDays, ResidualDays,
@@ -667,8 +689,7 @@ C***********************************************************************
  
       IMPLICIT NONE
       INTEGER MAXDAYS
-      REAL    ESP_LAT_HIST(MAXDAYS,5)
-      REAL    SUP_INF_LIST(MAXDAYS), LAI_INF_LIST(MAXDAYS)
+      REAL    ESP_LAT_HIST(MAXDAYS,4)
       REAL    ADMITTED_AREA(MAXDAYS)
       INTEGER SLOT_DAE(MAXDAYS)
       INTEGER DAE, PLANT_LIVE, N_ACTIVE_COH
@@ -679,8 +700,6 @@ C***********************************************************************
       REAL    DISEASE_LAI, DISEASE_SEN_RATE, VIRTUAL_PHOTO_FACTOR
  
       ESP_LAT_HIST  = 0.0
-      SUP_INF_LIST  = 0.0
-      LAI_INF_LIST  = 0.0
       ADMITTED_AREA = 0.0
       SLOT_DAE      = 0
  
@@ -715,7 +734,7 @@ C***********************************************************************
      &                            ESP_LAT_HIST, ADMITTED_AREA, SLOT_DAE)
       IMPLICIT NONE
       INTEGER MAXDAYS, K
-      REAL    ESP_LAT_HIST(MAXDAYS,5)
+      REAL    ESP_LAT_HIST(MAXDAYS,4)
       REAL    ADMITTED_AREA(MAXDAYS)
       INTEGER SLOT_DAE(MAXDAYS)
  
@@ -724,7 +743,6 @@ C***********************************************************************
       ESP_LAT_HIST(K,2) = 0.0
       ESP_LAT_HIST(K,3) = 0.0
       ESP_LAT_HIST(K,4) = 0.0
-      ESP_LAT_HIST(K,5) = 0.0
       ADMITTED_AREA(K)  = 0.0
       SLOT_DAE(K)       = 0
  
@@ -815,7 +833,7 @@ C***********************************************************************
      &    TMIN_G, TOT_G, TMAX_G, TMIN_D, TOT_D, TMAX_D,
      &    LDMIN, LESIONAGEOPT, LESLIFEMAX, BETA, RRDS,
      &    NCYCLE, DAE_MIN, DAE_MIN_PRESENT,
-     &    SRC_HALF, FAV_THR, NDS)
+     &    SRC_HALF, FAV_THR, NDS, DEP_FRAC)
 
       USE ModuleDefs
       IMPLICIT NONE
@@ -827,13 +845,13 @@ C***********************************************************************
       REAL    YMAX, COF_A, COF_B
       REAL    TMIN_G, TOT_G, TMAX_G, TMIN_D, TOT_D, TMAX_D
       REAL    LDMIN, LESIONAGEOPT, LESLIFEMAX, BETA, RRDS
-      REAL    SRC_HALF, FAV_THR, NDS
+      REAL    SRC_HALF, FAV_THR, NDS, DEP_FRAC
       INTEGER DAE_MIN
       LOGICAL DAE_MIN_PRESENT
       CHARACTER(LEN=1) NCYCLE
 
       INTEGER, PARAMETER :: MAXTOK = 30
-      INTEGER, PARAMETER :: NREQ   = 24
+      INTEGER, PARAMETER :: NREQ   = 25
       CHARACTER(LEN=6),  PARAMETER :: ERRKEY = 'DISMO '
  
       CHARACTER(LEN=32)  TOKEN(MAXTOK)
@@ -873,6 +891,7 @@ C***********************************************************************
       LNUM           = 0
       FAV_THR        = -99.0
       NDS             = 0.0
+      DEP_FRAC        = 0.25
  
       DO WHILE (.TRUE.)
           READ(LUN_DIS, '(A)', IOSTAT=IOS) LINE
@@ -918,7 +937,7 @@ C***********************************************************************
               END IF
  
               IF (NTOK .LT. NREQ) THEN
-                  MSG(1) = 'Disease record has fewer than 24 required'
+                  MSG(1) = 'Disease record has fewer than 25 required'
                   MSG(2) = 'columns. CLD_THR and CLD_W were removed,'
                   MSG(3) = 'FAV_THR added and NDS redefined: rewrite'
                   MSG(4) = 'the file, do not patch it.'
@@ -940,27 +959,29 @@ C***********************************************************************
               CALL DISMO_TOKR(TOKEN,MAXTOK,NTOK, 5,  1.0, SRC_HALF,OK)
               CALL DISMO_TOKR(TOKEN,MAXTOK,NTOK, 6, 30.0, FAV_THR, OK)
               CALL DISMO_TOKR(TOKEN,MAXTOK,NTOK, 7,  0.0, NDS,   OK)
-              CALL DISMO_TOKR(TOKEN,MAXTOK,NTOK, 8,1.0E-6,LESION_S,OK)
-              CALL DISMO_TOKR(TOKEN,MAXTOK,NTOK, 9,  1.0, KVERHULST,
+              CALL DISMO_TOKR(TOKEN,MAXTOK,NTOK, 8, 0.25, DEP_FRAC,
      &                        OK)
-              CALL DISMO_TOKR(TOKEN,MAXTOK,NTOK,10,  0.1, RVERHULST,
+              CALL DISMO_TOKR(TOKEN,MAXTOK,NTOK, 9,1.0E-6,LESION_S,OK)
+              CALL DISMO_TOKR(TOKEN,MAXTOK,NTOK,10,  1.0, KVERHULST,
      &                        OK)
-              CALL DISMO_TOKR(TOKEN,MAXTOK,NTOK,11,  1.0, YMAX,  OK)
-              CALL DISMO_TOKR(TOKEN,MAXTOK,NTOK,12,  0.1, COF_A, OK)
-              CALL DISMO_TOKR(TOKEN,MAXTOK,NTOK,13,  1.0, COF_B, OK)
-              CALL DISMO_TOKR(TOKEN,MAXTOK,NTOK,14, 10.0, TMIN_G,OK)
-              CALL DISMO_TOKR(TOKEN,MAXTOK,NTOK,15, 22.0, TOT_G, OK)
-              CALL DISMO_TOKR(TOKEN,MAXTOK,NTOK,16, 30.0, TMAX_G,OK)
-              CALL DISMO_TOKR(TOKEN,MAXTOK,NTOK,17, 10.0, TMIN_D,OK)
-              CALL DISMO_TOKR(TOKEN,MAXTOK,NTOK,18, 24.0, TOT_D, OK)
-              CALL DISMO_TOKR(TOKEN,MAXTOK,NTOK,19, 32.0, TMAX_D,OK)
-              CALL DISMO_TOKR(TOKEN,MAXTOK,NTOK,20,  6.0, LDMIN, OK)
-              CALL DISMO_TOKR(TOKEN,MAXTOK,NTOK,21,  0.5, LESIONAGEOPT,
+              CALL DISMO_TOKR(TOKEN,MAXTOK,NTOK,11,  0.1, RVERHULST,
      &                        OK)
-              CALL DISMO_TOKR(TOKEN,MAXTOK,NTOK,22, 30.0, LESLIFEMAX,
+              CALL DISMO_TOKR(TOKEN,MAXTOK,NTOK,12,  1.0, YMAX,  OK)
+              CALL DISMO_TOKR(TOKEN,MAXTOK,NTOK,13,  0.1, COF_A, OK)
+              CALL DISMO_TOKR(TOKEN,MAXTOK,NTOK,14,  1.0, COF_B, OK)
+              CALL DISMO_TOKR(TOKEN,MAXTOK,NTOK,15, 10.0, TMIN_G,OK)
+              CALL DISMO_TOKR(TOKEN,MAXTOK,NTOK,16, 22.0, TOT_G, OK)
+              CALL DISMO_TOKR(TOKEN,MAXTOK,NTOK,17, 30.0, TMAX_G,OK)
+              CALL DISMO_TOKR(TOKEN,MAXTOK,NTOK,18, 10.0, TMIN_D,OK)
+              CALL DISMO_TOKR(TOKEN,MAXTOK,NTOK,19, 24.0, TOT_D, OK)
+              CALL DISMO_TOKR(TOKEN,MAXTOK,NTOK,20, 32.0, TMAX_D,OK)
+              CALL DISMO_TOKR(TOKEN,MAXTOK,NTOK,21,  6.0, LDMIN, OK)
+              CALL DISMO_TOKR(TOKEN,MAXTOK,NTOK,22,  0.5, LESIONAGEOPT,
      &                        OK)
-              CALL DISMO_TOKR(TOKEN,MAXTOK,NTOK,23,  1.0, BETA,  OK)
-              CALL DISMO_TOKR(TOKEN,MAXTOK,NTOK,24,  0.0, RRDS,  OK)
+              CALL DISMO_TOKR(TOKEN,MAXTOK,NTOK,23, 30.0, LESLIFEMAX,
+     &                        OK)
+              CALL DISMO_TOKR(TOKEN,MAXTOK,NTOK,24,  1.0, BETA,  OK)
+              CALL DISMO_TOKR(TOKEN,MAXTOK,NTOK,25,  0.0, RRDS,  OK)
 
               FOUND_DISEASE = .TRUE.
               EXIT
@@ -1016,6 +1037,16 @@ C***********************************************************************
           MSG(1) = 'NDS must be positive: with no arriving spores the'
           MSG(2) = 'inoculum arrival releases nothing and no epidemic'
           MSG(3) = 'can start. Check column 7.'
+          CALL WARNING(3, ERRKEY, MSG)
+          CALL ERROR(ERRKEY, 59, DISFIL, LNUM)
+      END IF
+
+!     A settling fraction outside (0,1] either freezes the cloud or
+!     deposits more than exists.
+      IF (DEP_FRAC .LE. 0.0 .OR. DEP_FRAC .GT. 1.0) THEN
+          MSG(1) = 'DEP_FRAC must lie in (0,1]: it is the fraction'
+          MSG(2) = 'of the airborne cloud that settles in one day.'
+          MSG(3) = 'Use 1.0 for the old instantaneous deposition.'
           CALL WARNING(3, ERRKEY, MSG)
           CALL ERROR(ERRKEY, 59, DISFIL, LNUM)
       END IF
@@ -1464,19 +1495,22 @@ C***********************************************************************
       RETURN
       END SUBROUTINE F_IR
  
-!----- Canopy interception capacity fraction ---------------------------
-!  CLOUD is the airborne spore density (m-2); the canopy can hold at
-!  most HEALTH_LAI / LESION_S lesion-sized deposition sites, so
-!  F_CANSPO x CLOUD = MIN(CLOUD, capacity).
-      SUBROUTINE F_CANSPO(LAI, CLOUD, LESION_S, FSS)
+!----- Fraction of the airborne cloud deposited today ------------------
+!  Two ceilings, whichever bites first:
+!    settling : only DEP_FRAC of what is airborne reaches the canopy
+!               in a day, so a cloud drains over several days;
+!    capacity : the canopy holds at most HEALTH_LAI / LESION_S
+!               lesion-sized deposition sites.
+!  So F_CANSPO x CLOUD = MIN(DEP_FRAC x CLOUD, capacity).
+      SUBROUTINE F_CANSPO(LAI, CLOUD, LESION_S, DEP_FRAC, FSS)
       IMPLICIT NONE
-      REAL FSS, LAI, CLOUD, LESION_S, CAPACITY
+      REAL FSS, LAI, CLOUD, LESION_S, DEP_FRAC, CAPACITY
  
       IF (CLOUD .LE. 0.0 .OR. LESION_S .LE. 0.0) THEN
           FSS = 0.0
       ELSE
           CAPACITY = MAX(LAI, 0.0) / LESION_S
-          FSS = MIN(CAPACITY / CLOUD, 1.0)
+          FSS = MIN(CAPACITY / CLOUD, MAX(DEP_FRAC, 0.0))
           FSS = MAX(FSS, 0.0)
       END IF
  
@@ -1539,6 +1573,21 @@ C***********************************************************************
       RETURN
       END SUBROUTINE F_LAF
  
+!----- Expanded fraction of a lesion's final area ----------------------
+!  Rising limb of the same triangular lesion-age curve F_LAF uses: a
+!  lesion breaks latency as a fleck and reaches its final size at
+!  LESIONAGEOPT, the age at which the model already places peak
+!  sporulation.  It introduces no parameter of its own.
+      SUBROUTINE F_LEXP(LA, LESIONAGEOPT, EXPN)
+      IMPLICIT NONE
+      REAL LA, LESIONAGEOPT, EXPN
+
+      EXPN = MAX(LA, 0.0) / MAX(LESIONAGEOPT, 1.0E-6)
+      EXPN = MIN(MAX(EXPN, 0.0), 1.0)
+
+      RETURN
+      END SUBROUTINE F_LEXP
+
 !----- Logistic sporulation in population space ------------------------
 
       SUBROUTINE F_PPSR_POP(KVERHULST, RVERHULST, NPREV, INF_SURF_PREV,
@@ -1720,9 +1769,7 @@ C***********************************************************************
 ! WTLF (kg ha-1)    : Leaf mass
 ! SLDOT (kg ha-1 d-1): Natural leaf senescence rate from DSSAT
 ! ESP_LAT_HIST(:,:) : Cohort ring buffer (MAXDAYS x 5); columns
-!                     C_LES / C_LATP / C_INFF / C_AGE / C_SEC
-! SUP_INF_LIST(:)   : Infectious surface, ring indexed (legacy export)
-! LAI_INF_LIST(:)   : Cumulative necrotic LAI, ring indexed (legacy)
+!                     C_LES / C_LATP / C_INFF / C_AGE
 ! YRDOY, YREMRG     : Current date, emergence date (YRDOY convention)
 ! NVEG0             : DAS threshold for the emergence gate
 ! YREND             : Harvest / end-of-season date
@@ -1735,10 +1782,10 @@ C***********************************************************************
 ! MAXPRESEASON : Maximum pre-plant days stored for output replay
 ! EPS          : Small epsilon for safe divisions
 !
-! ------------- Parameters (parameter file, 24 tokens) -----------------
+! ------------- Parameters (parameter file, 25 tokens) -----------------
 ! Token numbers are the record columns READ_DISEASE_PARAMETERS reads.
 ! Tokens 1-2 are VAR# and VRNAME.  There are no optional columns: a
-! record with fewer than 24 tokens is rejected.
+! record with fewer than 25 tokens is rejected.
 !
 !  3 DAE_START        : Observed onset date, in days after emergence,
 !                     when the user has one from the field.  Arrival
@@ -1760,18 +1807,30 @@ C***********************************************************************
 !                     scale -- but now the whole dose delivered once,
 !                     not a per-day rate against the cloud index, so it
 !                     needs recalibrating on the new scale.
-!  8 LESION_S (m2)    : Average lesion surface area
-!  9 KVERHULST        : Logistic carrying capacity per unit LAI
-! 10 RVERHULST        : Logistic intrinsic rate
-! 11 YMAX             : Maximum infection efficiency (0-1)
-! 12 COF_A, 13 COF_B  : Infection response vs leaf wetness
-! 14 TMIN_G 15 TOT_G 16 TMAX_G : Cardinal temperatures, germination
-! 17 TMIN_D 18 TOT_D 19 TMAX_D : Cardinal temperatures, development
-! 20 LDMIN (d)        : Minimum latent period
-! 21 LESIONAGEOPT     : Relative lesion age of peak sporulation, in (0,1)
-! 22 LESLIFEMAX (d)   : Maximum lesion lifespan
-! 23 BETA             : Virtual lesion exponent; 1 = no effect
-! 24 RRDS (d-1)       : Relative disease senescence rate
+!  8 DEP_FRAC         : Fraction of the airborne cloud that settles
+!                     onto the canopy in one day, in (0,1].  Caps
+!                     F_CANSPO, so a cloud drains over several days
+!                     instead of all at once; 1.0 restores the old
+!                     instantaneous deposition.  Applies to BOTH the
+!                     primary pool and the secondary cloud.
+!                     NOT a free coordinate for the calibration: it
+!                     is partly collinear with NDS on the primary
+!                     path and with RVERHULST on the secondary one.
+!                     Fix it from literature or a predeclared
+!                     sensitivity analysis, the way SRC_HALF is
+!                     fixed by diagnostic.
+!  9 LESION_S (m2)    : Average lesion surface area
+! 10 KVERHULST        : Logistic carrying capacity per unit LAI
+! 11 RVERHULST        : Logistic intrinsic rate
+! 12 YMAX             : Maximum infection efficiency (0-1)
+! 13 COF_A, 14 COF_B  : Infection response vs leaf wetness
+! 15 TMIN_G 16 TOT_G 17 TMAX_G : Cardinal temperatures, germination
+! 18 TMIN_D 19 TOT_D 20 TMAX_D : Cardinal temperatures, development
+! 21 LDMIN (d)        : Minimum latent period
+! 22 LESIONAGEOPT     : Relative lesion age of peak sporulation, in (0,1)
+! 23 LESLIFEMAX (d)   : Maximum lesion lifespan
+! 24 BETA             : Virtual lesion exponent; 1 = no effect
+! 25 RRDS (d-1)       : Relative disease senescence rate
 !
 ! ------------------ Fixed constants (set in RUNINIT) ------------------
 ! LAI_MIN_START     : Minimum LAI for deposition
@@ -1845,10 +1904,42 @@ C***********************************************************************
 ! F_CANSPO / F_DS    : Canopy interception capacity and deposition
 ! F_LR / F_LS        : Latency rate and new latent lesions
 ! F_LAR / F_LAF      : Lesion ageing rate and lesion age factor
-! F_PPSR_POP         : Logistic sporulation (see unit caveat, note B)
+! F_LEXP             : Expanded fraction of a lesion's final area
+! F_PPSR_POP         : Logistic sporulation (see note B below)
 ! CALC_DVIP / APPLY_FUNGICIDE : Risk index and spray decision
 ! F_VIRTUAL_LESIONS  : Residual photosynthetic reduction
 ! F_SEVERITY         : Severity (%)
 ! F_DEFOLIATION      : Disease-induced senescence rate
 !=======================================================================
- 
+!
+!***********************************************************************
+!  NOTE B -- WHAT RVERHULST ACTUALLY IS
+!***********************************************************************
+!  F_PPSR_POP runs a Verhulst logistic in LESION-POPULATION space:
+!
+!      KTOTAL = KVERHULST * LAI_SUSC          ! max lesions
+!      DN     = RVERHULST * N * (KTOTAL - N) / KTOTAL
+!
+!  KVERHULST is documented as max lesions per unit LAI, so KTOTAL is
+!  a lesion count and DN is therefore NEW LESIONS PER DAY, not
+!  spores.  DN is nevertheless carried forward as if it were an
+!  emission: divided by the infectious area, multiplied back by each
+!  cohort's area and by FT_D and LAF, summed into SEC_SPORES_PENDING,
+!  and only then converted to lesions again by IR inside F_LS.
+!
+!  The consequence is that the realised rate of the epidemic is
+!
+!      r_realised  ~  RVERHULST * <FT_D * LAF * IR>
+!
+!  with all three factors at or below one and IR bounded by YMAX.
+!  RVERHULST is therefore NOT the apparent infection rate of the
+!  epidemic, and published r values for soybean rust must not be
+!  used as priors on it -- it sits above them by roughly the inverse
+!  of that mean product.  Fit it against the data and report it as a
+!  model coefficient, not as an epidemiological rate.
+!
+!  Kept as is deliberately: the pipeline conserves area correctly and
+!  the logistic still supplies the density dependence it is there
+!  for.  Only the INTERPRETATION of the coefficient needed pinning
+!  down.
+!=======================================================================
