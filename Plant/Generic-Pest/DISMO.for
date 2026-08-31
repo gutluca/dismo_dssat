@@ -1292,9 +1292,9 @@ C***********************************************************************
       REAL TMIN_D, TOT_D, TMAX_D, SRC_SURV
       REAL DAILY_IP, SOURCE_PRESSURE, T, LWD, FT, FT_D
       REAL FAV_SUM
-      REAL FT_G, TDEW, ES, E, RH_LOCAL
+      REAL FT_G, TDEW, ES, E, RH_LOCAL, T_WET
       LOGICAL USE_WTH_RH
- 
+
       CALL F_TAVG(TMAX, TMIN, T)
       RH_LOCAL = RH
       IF (.NOT. USE_WTH_RH) THEN
@@ -1302,7 +1302,45 @@ C***********************************************************************
           CALL F_RH(RH_LOCAL, TDEW, ES, E, T)
       END IF
       CALL F_LWD(RH_LOCAL, LWD)
-      CALL T_DEV(T, TMIN_G, TOT_G, TMAX_G, TMIN_D, TOT_D, TMAX_D,
+
+C-----------------------------------------------------------------------
+C  T_WET -- the temperature the WET-PERIOD processes actually see.
+C
+C  Germination and penetration are NIGHT processes: dew forms after
+C  sunset and the leaf stays wet until shortly after sunrise, so the
+C  temperature governing them sits near the daily minimum, not at the
+C  daily mean.  Feeding T = (Tmax+Tmin)/2 to T_DEV averaged an
+C  inhibitory afternoon into a favourable night and flattened the
+C  response.  The published cardinals come from constant-temperature
+C  germination assays, so reading them at the night temperature is
+C  closer to how they were measured than reading them at a mean.
+C
+C  Measured on the rebuilt binary, without recalibrating anything:
+C
+C                            FT amplitude   r with days(5->60 %)
+C    daily mean (T)             0.208        +0.205  (WRONG SIGN)
+C    daily minimum (T_WET)      0.360        -0.358  (right sign)
+C
+C  Rondonopolis becomes the most favourable regime, which is what the
+C  data say -- under the mean it had the LOWEST FT_D while being the
+C  fastest epidemic.  Tmin + 0.25*(Tmax-Tmin) was also tried and is
+C  worse than both (amplitude 0.054): it lands on the optimum, where
+C  the curve is flat.
+C
+C  T (the daily mean) still feeds the RH/dew estimate above and
+C  CALC_DVIP elsewhere, which are daily-mean quantities by definition.
+C  Only the thermal-response call changes.
+C
+C  NOTE: FAV_SUM accumulates FT_G, so this rescales the arrival clock.
+C  FAV_THR values and brackets estimated against the daily mean do NOT
+C  carry over and must be re-measured (diagnostic_fav_sum.py).
+C
+C  Written 08/30/2026, lost before it was committed, reinstated
+C  08/31/2026 on the 08/28 model.  It is the ONLY part of the 08/30
+C  working tree that was brought back.
+C-----------------------------------------------------------------------
+      T_WET = TMIN
+      CALL T_DEV(T_WET, TMIN_G, TOT_G, TMAX_G, TMIN_D, TOT_D, TMAX_D,
      &           FT, FT_D, FT_G)
  
 !     Daily climatic favourability for the regional source (0..1).
