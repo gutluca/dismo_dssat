@@ -18,24 +18,8 @@ C  03/10/2026 Moved DISMO.for from Plant\CROPGRO to Plant\Generic-Pest
 C  06/25/2026 Improved output file formatting
 C  07/17/2026 Added defoliation/senescence logic
 C  07/28/2026 Added monocyclic disease support (NCYCLE parameter: M/P)
-C  08/24/2026 Added pre-plant environmental inoculum reconstruction.
-C  09/02/2026 FAV_SUM counts only POST-EMERGENCE exposure.  It used to
-C             accumulate through the pre-plant replay too, which made
-C             its value at planting depend on the sowing date rather
-C             than on the crop.  SOURCE_PRESSURE still carries the
-C             pre-season -- that is what it is for.  FAV_THR values
-C             fitted on the old scale do not carry over.
-C  08/30/2026 Primary arrival opens a weather-modulated tap instead of
-C             a one-shot release: the regional source keeps supplying.
-C  08/30/2026 Thermal responses read the night temperature (T_WET),
-C             not the daily mean: infection is a nocturnal process.
-C  08/28/2026 Lesion expansion: a cohort's necrotic area now accrues
-C             over the lesion-age curve instead of being charged in
-C             full on the day latency ends.
-C  08/27/2026 Primary inoculum arrival: FAV_SUM latch + finite pool;
-C             DEP_FRAC spreads deposition over days.
-C             DAE_START now sets the arrival day when the user has an
-C             observed onset; FAV_THR decides it otherwise.
+C  09/02/2026 Added pre-plant environmental inoculum reconstruction, primary inoculum
+C             build-up and disease start based on weather favourability (FAV_THR) or observed onset (DAE_MIN).
 C-----------------------------------------------------------------------
       SUBROUTINE DISEASE_LEAF (DYNAMIC,
      &    CONTROL, ISWITCH, Tmin, Tmax, RH, LAI_TOTAL,    ! Input
@@ -285,11 +269,7 @@ C***********************************************************************
 C-----------------------------------------------------------------------
 C  1. ENVIRONMENT.  Unconditional, every day, canopy or no canopy.
 C-----------------------------------------------------------------------
-C  COUNT_EXPOSURE uses the same test as the emergence gate in section 2
-C  below, evaluated here so the emergence day itself counts: the arrival
-C  clock measures how long the CROP has been exposed, so it starts when
-C  there is a crop.  SOURCE_PRESSURE is unaffected and keeps carrying the
-C  pre-season, which is what it is for.
+
           CALL DISMO_UPDATE_ENVIRONMENT(Tmin, Tmax, RH, USE_WTH_RH,
      &         TMIN_G, TOT_G, TMAX_G, TMIN_D, TOT_D, TMAX_D,
      &         SRC_SURV, DAILY_IP, SOURCE_PRESSURE, FAV_SUM,
@@ -319,30 +299,7 @@ C-----------------------------------------------------------------------
 C  3. CANOPY BOOKKEEPING
 C-----------------------------------------------------------------------
           LAI_PEAK_SEASON = MAX(LAI_PEAK_SEASON, LAI_TOTAL)
- 
-C  LAI_SUSC   : epidemic reference -- tissue that ever existed minus
-C               what the epidemic already destroyed.  Both terms are on
-C               the PEAK basis, so the subtraction is well posed.  Used
-C               for area admission, carrying capacity and severity.
-C  HEALTH_LAI : the part of TODAY'S canopy that is not diseased.  Used
-C               for deposition -- spores only land on what is there.
-C
-C  HEALTH_LAI used to be LAI_TOTAL - CUM_NECROTIC, which subtracts two
-C  quantities held on different bases: CUM_NECROTIC accumulates against
-C  LAI_PEAK_SEASON, the largest canopy the crop ever carried, while
-C  LAI_TOTAL is today's canopy and falls as the crop matures.  Their
-C  difference therefore reaches zero long before the canopy is actually
-C  destroyed, and DEPOSITION_OK then switches the epidemic off outright.
-C  Traced on Citra 2006 (2026-08-30): at DAS 106 LAI_TOTAL was still
-C  2.08 and severity only 37.6 %, yet HEALTH_LAI hit zero, DS_TOTAL and
-C  LS_TODAY went to zero on the same day, and severity froze at 50.96 %
-C  for the remaining forty days while the observations climbed to 82 %.
-C  That is the flat shelf seen on most of the US curves.
-C
-C  The healthy part of today's canopy is today's canopy times the
-C  fraction that is not diseased -- exactly the basis DISEASE_LAI is
-C  already exported on further down.  It reaches zero only when
-C  severity reaches 100 %, which is the intended meaning.
+
           LAI_SUSC   = MAX(LAI_PEAK_SEASON - CUM_NECROTIC, 0.0)
           IF (LAI_PEAK_SEASON .GT. EPS) THEN
               HEALTH_LAI = LAI_TOTAL
@@ -385,52 +342,7 @@ C-----------------------------------------------------------------------
      &                   (SOURCE_PRESSURE + MAX(SRC_HALF, EPS))
 
 C  --- primary inoculum arrival --------------------------------------
-C  Arrival is an EVENT that opens a TAP, not a single shot.  The latch
-C  fires once per season, on the day the weather clock (or the observed
-C  onset) says the pathogen reached the field; from that day on the
-C  regional source keeps supplying, modulated by today's favourability.
-C
-C  It used to release one finite pool NDS * F_SOURCE and nothing more.
-C  That left the canopy with NO inoculum at all between the primary
-C  pulse and the first secondary sporulation, which cannot happen until
-C  one full latent period after arrival.  Traced on Rondonopolis
-C  2005-11-18 (2026-08-30): arrival DAS 25, first secondary spores DAS
-C  44, and in between LS_TODAY fell from 7.9E+04 to 8.8 while
-C  SEC_SPORE_CLOUD sat at exactly zero for nineteen days.  Severity rose
-C  to 14 %, went flat for ten days, then entered the main climb -- the
-C  early shoulder, reached by a different route than the step-necrosis
-C  one fixed on 08/28 (which is still fixed; F_LEXP is untouched).
-C  Shortening the latent period only shortened the desert (19 d -> 10 d)
-C  without lifting its floor, and neither DEP_FRAC nor the lesion
-C  expansion time could fill it: measured, none of the three removed the
-C  shoulder, so the gap is in the SUPPLY, not in what happens to it.
-C
-C  A regional source does not stop existing the day it is first
-C  detected.  SOURCE_PRESSURE is already carried all season with its own
-C  34-day half-life; this makes the dose it delivers a daily quantity,
-C  gated by the same DAILY_IP that builds FAV_SUM, so external supply
-C  follows the weather instead of a single calendar day.
-C
-C  Two ways to decide the day, chosen by DAE_START in the input file:
-C
-C  DAE_START = a value : the user knows the onset date from the field.
-C                        Arrival happens on that day after emergence,
-C                        calendarised, and the weather clock is ignored.
-C  DAE_START = -99     : no observed date, so onset is decided by the
-C                        weather.  Arrival happens when FAV_SUM, the
-C                        accumulated favourability counted from the
-C                        first replayed pre-plant day, reaches FAV_THR.
-C
-C  Either way the latch is armed inside DEPOSITION_OK, so arrival is
-C  never registered before there is a canopy to receive it.
-C
-C  FAV_THR sets WHEN and NDS sets HOW MUCH.  They act on different
-C  features of the severity curve -- NDS cannot move the arrival
-C  day and FAV_THR cannot change the size of the supply -- so they are
-C  separately identifiable against a severity objective.  NDS is now the
-C  dose delivered on a FULLY FAVOURABLE day (DAILY_IP = 1) rather than
-C  the whole season's dose, so values fitted under the old meaning do
-C  not carry over and must be re-estimated.
+
               IF (.NOT. PRI_RELEASED) THEN
                   IF (DAE_MIN_PRESENT) THEN
                       PRI_RELEASED = (DAE .GE. DAE_MIN)
@@ -503,28 +415,11 @@ C  --- latent to infectious (once) ---
 C  ADMITTED_AREA(k) is the cohort's FINAL footprint: the area those
 C  lesions occupy once fully expanded.  It is fixed here, capped by
 C  the leaf area still available, and drives sporulation from this day
-C  on exactly as before.  It is NOT charged to the necrosis here.  A
-C  lesion that has just broken latency is a fleck, not a full lesion;
-C  it reaches its final size at LESIONAGEOPT -- the same age at which
-C  the model already places peak sporulation.  Charging the whole
-C  footprint on the day latency ends made necrosis a step while
-C  sporulation stayed a ramp, and that phase gap is what produced the
-C  early severity shoulder.  The area is therefore accrued day by day
-C  in the infectious block below, on the same lesion-age clock.
+C  on exactly as before.  It is NOT charged to the necrosis here.  
+ 
                   IF ((ESP_LAT_HIST(k, C_LATP) .GE. 1.0) .AND.
      &                (ESP_LAT_HIST(k, C_INFF) .LT. 0.5)) THEN
-C  The cap must be against area that is neither necrotic already nor
-C  spoken for by a lesion that has not finished expanding.  It used to
-C  read LAI_SUSC - NEW_LOSS_TODAY, which was right while NEW_LOSS_TODAY
-C  carried the WHOLE footprint of every cohort crossing latency that
-C  day.  Since 08/28 it carries only the day's expansion increment, so
-C  that expression is about LAI_SUSC and the cap stopped biting: live
-C  cohorts could claim several times the leaf area that exists, which
-C  inflates IS, the logistic population built from it, and sporulation.
-C  PEND_AREA is yesterday's not-yet-necrotic claim, accumulated in the
-C  infectious block below -- the same one-day-old convention PREV_IS
-C  already uses, and for the same reason: the current day's total is
-C  not known until the loop ends.
+
                       ESP_LAT_HIST(k, C_INFF) = 1.0
                       INF_AREA_K = MAX(ESP_LAT_HIST(k, C_LES), 0.0)
      &                             * LESION_S
@@ -556,7 +451,7 @@ C  stays in CUM_NECROTIC -- necrosis is permanent.
 C  --- lesion expansion: this cohort's share of today's necrosis ---
 C  Only the INCREMENT of the expanded fraction turns necrotic today.
 C  Over the cohort's life the increments sum to ADMITTED_AREA(k)
-C  exactly -- expansion always completes before the lesion retires --
+C  exactly (expansion always completes before the lesion retires)
 C  so the total necrosis a cohort produces is unchanged.  Only its
 C  arrival is spread over the expansion period.
                       CALL F_LEXP(LA, LESIONAGEOPT, EXPN)
@@ -722,10 +617,6 @@ C***********************************************************************
      &       '        DSTO        LSTO        NLTO',
      &       '      FSRC')
 
-C  PRIM reports PRI_CLOUD, the primary inoculum AVAILABLE today, not the
-C  residue PRI_POOL.  When the canopy is large the whole released pool
-C  deposits on the day it arrives, so PRI_POOL is already back to zero
-C  by the time OUTPUT runs and would never mark the arrival at all.
           WRITE(LUN_OUT, 30)
      &     IYEAR, IDOY, CONTROL%DAS, IDAP,
      &     HEALTH_LAI,
@@ -764,7 +655,7 @@ C***********************************************************************
       END SUBROUTINE DISEASE_LEAF
  
 !=======================================================================
-!  SUPPORT SUBROUTINES
+!  SUBROUTINES
 !=======================================================================
  
 !-----------------------------------------------------------------------
@@ -911,12 +802,6 @@ C***********************************************************************
 !  purely by accumulated weather.  A blank field is NOT accepted --
 !  the reader is whitespace based, so a blank would shift every
 !  following column by one position.
-!
-!  Column order changed on 08/27/2026: CLD_THR and CLD_W were removed,
-!  FAV_THR was added, and NDS moved into the inoculum block with a new
-!  meaning -- the whole dose released on arrival, not a per-day rate
-!  against the cloud index.  A file written before that date has 25
-!  tokens with different meanings, so it must be rewritten, not patched.
 !-----------------------------------------------------------------------
       SUBROUTINE READ_DISEASE_PARAMETERS(CONTROL,
      &    LESION_S, KVERHULST, RVERHULST,
@@ -1400,90 +1285,15 @@ C  FAVS column reads zero over the replayed days, which is honest.
       END IF
       CALL F_LWD(RH_LOCAL, LWD)
 
-!     Temperature the PATHOGEN experiences, not the mean of the day.
-!     Germination, penetration and the whole infection court are a
-!     NOCTURNAL process: dew forms after sunset and the leaf stays wet
-!     until shortly after sunrise, so the temperature that governs them
-!     sits close to the daily minimum, not halfway between minimum and
-!     maximum.  The published cardinals are themselves from constant-
-!     temperature germination assays, so reading them at the night
-!     temperature is closer to how they were measured than reading them
-!     at a daily mean that averages an inhibitory afternoon into a
-!     favourable night.
-!
-!     Measured on the nine Brazilian curves over the observed epidemic
-!     window (2026-08-30), against the observed time from 5 % to 60 %
-!     severity, which varies 2.2-fold across those site-years:
-!         FT on the daily mean   spread 0.208, r = +0.205  (wrong sign)
-!         FT on the daily min    spread 0.360, r = -0.358  (right sign)
-!     The daily mean sits on the DESCENDING limb of the response for the
-!     hot site-years, so the model made Rondonopolis -- the fastest
-!     epidemics observed, 19-23 d -- its LEAST favourable thermal
-!     regime.  The night temperature puts those same days on the
-!     ascending limb, where the response still discriminates.
-!     Tmin + 0.25*(Tmax-Tmin) was tested too and is worse than either
-!     (spread 0.054): it lands on the optimum, where the curve is flat.
-!
-!     T (the daily mean) is deliberately still used for the RH/dew
-!     estimate above and for CALC_DVIP below: those are daily-average
-!     quantities and the DVIP classes are defined on mean temperature.
       T_WET = TMIN
       CALL T_DEV(T_WET, TMIN_G, TOT_G, TMAX_G, TMIN_D, TOT_D, TMAX_D,
      &           FT, FT_D, FT_G)
  
-!     Daily climatic favourability for the regional source (0..1).
-!
-!     THE ARRIVAL CLOCK READS THE DAILY MEAN, not the night (09/03/2026).
-!     DAILY_IP builds FAV_SUM, and FAV_SUM answers "has enough favourable
-!     weather passed for the regional inoculum source to have grown and
-!     dispersed" -- sporulation, spore survival and transport, processes
-!     with a daytime component that a hot, dry afternoon suppresses.  Only
-!     the infection court itself (F_IR through FT, latency and lesion
-!     ageing through FT_D) is purely nocturnal, and those keep T_WET.
-!
-!     Measured on the twelve Brazilian curves against the day of first
-!     field detection: FAV_SUM on the night temperature accumulates about
-!     2.5x faster at Rondonopolis (Tmin ~23, on the ASCENDING limb, FT_G
-!     ~0.97) than at Londrina (Tmin ~19-20, FT_G ~0.76-0.80), so a single
-!     FAV_THR fires far too early in the hotter cerrado.  On the daily
-!     mean the order reverses -- Rondonopolis (Tmean ~28, past the
-!     optimum, FT_G ~0.84) below Londrina (Tmean ~25, FT_G ~0.94) -- which
-!     is the discrimination the clock needs.
+
       CALL T_DEV(T, TMIN_G, TOT_G, TMAX_G, TMIN_D, TOT_D, TMAX_D,
      &           FT_SRC, FT_D_SRC, FT_G_SRC)
       DAILY_IP = MAX(FT_G_SRC, 0.0) * MIN(MAX(LWD / 24.0, 0.0), 1.0)
  
-!     SOURCE_PRESSURE : slow store, 34-day half-life, steady state
-!                       ~ DAILY_IP / (1 - SRC_SURV).  A decayed SUM: it
-!                       measures how large the regional inoculum source
-!                       has grown, and through F_SOURCE it scales the
-!                       dose released on arrival.  Calibrate SRC_HALF on
-!                       THIS scale.
-!     FAV_SUM         : undecayed running sum of DAILY_IP, in
-!                       favourable-day equivalents, counted FROM
-!                       EMERGENCE ONWARD (COUNT_EXPOSURE).  It is the
-!                       clock the arrival latch reads, and the only
-!                       DISMO state that carries no decay -- a crop is
-!                       either far enough into favourable weather for
-!                       the pathogen to have arrived, or it is not.
-!
-!     The two stores answer DIFFERENT questions and only one of them is
-!     about the pre-season.  SOURCE_PRESSURE asks "how large has the
-!     REGIONAL source grown", which is exactly what the pre-plant replay
-!     reconstructs, and it decays with a 34-day half-life so old weather
-!     fades.  FAV_SUM asks "how long has THIS CROP been exposed", and a
-!     crop that does not exist cannot be exposed.
-!
-!     Until 09/02/2026 FAV_SUM also accumulated through the replay and
-!     the pre-plant window, which made its value at planting depend on
-!     the SOWING DATE rather than on the crop: a late sowing carried a
-!     head start into the threshold.  Measured on all 20 calibration
-!     curves, the day the clock fires missed the first field detection
-!     by 34.6 days on average in the United States -- worse than a
-!     calendar constant -- and three US curves crossed FAV_SUM 25 BEFORE
-!     PLANTING, where FAV_THR cannot do anything at all.  Counting only
-!     post-emergence exposure takes that to 14.9 days (Brazil 11.1 ->
-!     8.3).  FAV_THR values fitted on the old scale DO NOT CARRY OVER.
       SOURCE_PRESSURE = SOURCE_PRESSURE * SRC_SURV + DAILY_IP
       IF (COUNT_EXPOSURE) THEN
           FAV_SUM     = FAV_SUM                    + DAILY_IP
@@ -1742,7 +1552,7 @@ C  FAVS column reads zero over the replayed days, which is honest.
 !  Rising limb of the same triangular lesion-age curve F_LAF uses: a
 !  lesion breaks latency as a fleck and reaches its final size at
 !  LESIONAGEOPT, the age at which the model already places peak
-!  sporulation.  It introduces no parameter of its own.
+!  sporulation. 
       SUBROUTINE F_LEXP(LA, LESIONAGEOPT, EXPN)
       IMPLICIT NONE
       REAL LA, LESIONAGEOPT, EXPN
@@ -2034,8 +1844,14 @@ C  FAVS column reads zero over the replayed days, which is honest.
 ! ADMITTED_AREA(:)  : Area admitted to each cohort at activation
 ! SEVERITY_PCT      : Severity (%), output column SEV%; drives
 !                     defoliation and is the calibration target
+! LAI_SUSC          : epidemic reference -- tissue that ever existed minus
+!                     what the epidemic already destroyed.  Both terms are on
+!                     the PEAK basis, so the subtraction is well posed.  Used
+!                     for area admission, carrying capacity and severity.
+! HEALTH_LAI        : the part of TODAY'S canopy that is not diseased.  Used
+!                     for deposition -- spores only land on what is there.
 !
-! --------------- Output columns (DISMO.OUT, 21 columns) ---------------
+! --------------- Output columns (DISMO.OUT) ---------------
 ! Written in this order.  Pre-plant rows replay the values the weather
 ! had during the DISMO_PRESEASON reconstruction, so RHU%, LWDh, FTMP and
 ! FAVS are meaningful before planting; the epidemic columns are zero.
@@ -2079,36 +1895,47 @@ C  FAVS column reads zero over the replayed days, which is honest.
 ! F_VIRTUAL_LESIONS  : Residual photosynthetic reduction
 ! F_SEVERITY         : Severity (%)
 ! F_DEFOLIATION      : Disease-induced senescence rate
-!=======================================================================
+!                   
+! ------------------------- Arrival and Onset logic ---------------------
+!  Arrival is an EVENT that opens a TAP, not a single shot.  The latch
+!  fires once per season, on the day the weather clock (or the observed
+!  onset) says the pathogen reached the field; from that day on the
+!  regional source keeps supplying, modulated by today's favourability.
 !
-!***********************************************************************
-!  NOTE B -- WHAT RVERHULST ACTUALLY IS
-!***********************************************************************
-!  F_PPSR_POP runs a Verhulst logistic in LESION-POPULATION space:
+!  SOURCE_PRESSURE is already carried all season with its own
+!  34-day half-life; this makes the dose it delivers a daily quantity,
+!  gated by the same DAILY_IP that builds FAV_SUM, so external supply
+!  follows the weather instead of a single calendar day.
 !
-!      KTOTAL = KVERHULST * LAI_SUSC          ! max lesions
-!      DN     = RVERHULST * N * (KTOTAL - N) / KTOTAL
+!  Two ways to decide the day, chosen by DAE_START in the input file:
 !
-!  KVERHULST is documented as max lesions per unit LAI, so KTOTAL is
-!  a lesion count and DN is therefore NEW LESIONS PER DAY, not
-!  spores.  DN is nevertheless carried forward as if it were an
-!  emission: divided by the infectious area, multiplied back by each
-!  cohort's area and by FT_D and LAF, summed into SEC_SPORES_PENDING,
-!  and only then converted to lesions again by IR inside F_LS.
+!  DAE_START = a value : the user knows the onset date from the field.
+!                        Arrival happens on that day after emergence,
+!                        calendarised, and the weather clock is ignored.
+!  DAE_START = -99     : no observed date, so onset is decided by the
+!                        weather.  Arrival happens when FAV_SUM, the
+!                        accumulated favourability counted from the
+!                        first replayed pre-plant day, reaches FAV_THR.
 !
-!  The consequence is that the realised rate of the epidemic is
-!
-!      r_realised  ~  RVERHULST * <FT_D * LAF * IR>
-!
-!  with all three factors at or below one and IR bounded by YMAX.
-!  RVERHULST is therefore NOT the apparent infection rate of the
-!  epidemic, and published r values for soybean rust must not be
-!  used as priors on it -- it sits above them by roughly the inverse
-!  of that mean product.  Fit it against the data and report it as a
-!  model coefficient, not as an epidemiological rate.
-!
-!  Kept as is deliberately: the pipeline conserves area correctly and
-!  the logistic still supplies the density dependence it is there
-!  for.  Only the INTERPRETATION of the coefficient needed pinning
-!  down.
+!  FAV_THR sets WHEN and NDS sets HOW MUCH.  They act on different
+!  features of the severity curve -- NDS cannot move the arrival
+!  day and FAV_THR cannot change the size of the supply -- so they are
+!  separately identifiable against a severity objective.  NDS is the
+!  dose delivered on a FULLY FAVOURABLE day (DAILY_IP = 1) rather than
+!  the whole season's dose, so values fitted under the old meaning do
+!  not carry over and must be re-estimated.
+!     
+!     SOURCE_PRESSURE : slow store, 34-day half-life, steady state
+!                       ~ DAILY_IP / (1 - SRC_SURV).  A decayed SUM: it
+!                       measures how large the regional inoculum source
+!                       has grown, and through F_SOURCE it scales the
+!                       dose released on arrival.  Calibrate SRC_HALF on
+!                       THIS scale.
+!     FAV_SUM         : undecayed running sum of DAILY_IP, in
+!                       favourable-day equivalents, counted FROM
+!                       EMERGENCE ONWARD (COUNT_EXPOSURE).  It is the
+!                       clock the arrival latch reads, and the only
+!                       DISMO state that carries no decay -- a crop is
+!                       either far enough into favourable weather for
+!                       the pathogen to have arrived, or it is not.
 !=======================================================================
