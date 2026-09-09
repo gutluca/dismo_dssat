@@ -1,6 +1,6 @@
 C=======================================================================
 C  Disease Impact and Severity Module  --  DISMO
-C  Gustavo de Angelo Luca, Izael Martins Fattori Jr, Fabio Ricardo Marin
+C  Gustavo de Angelo Luca, Izael Martins Fattori Jr, Willingthon Pavan, Fabio Ricardo Marin
 C  Luiz de Queiroz College of Agriculture (ESALQ),
 C  University of Sao Paulo, Piracicaba, Brazil
 C
