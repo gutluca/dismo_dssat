@@ -1,6 +1,6 @@
 # Disease Impact and Severity Module - DISMO
 
-**Authors**: Gustavo de A. Luca, Izael M. Fattori Jr., Fábio R. Marin
+**Authors**: Gustavo de A. Luca, Izael M. Fattori Jr., Willingthon Pavan, Fábio R. Marin
 
 **Affiliation**: University of São Paulo – ESALQ/USP
 
